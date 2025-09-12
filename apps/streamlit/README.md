@@ -17,13 +17,28 @@ This app lets users describe the data they want in natural language. It uses Sno
 - Streamlit in Snowflake enabled (or run locally with Snowpark connector)
 
 ## Run in Snowflake (recommended)
-1. Upload this folder to a stage, then create the app:
+This app is designed to run inside Snowflake Streamlit using the active session (no credentials needed).
+
+1) Create a stage and upload the app files (from your workstation):
+```sql
+create or replace stage APP_STAGE;
+```
+Then in Snowsight or SnowSQL:
+```sql
+-- Upload the local folder to the stage (use Snowsight UI Upload, or SnowSQL PUT):
+-- SnowSQL example:
+-- !put file://apps/streamlit/* @APP_STAGE/apps/streamlit auto_compress=false overwrite=true;
+```
+
+2) Create the Streamlit app referencing the stage path:
 ```sql
 create or replace streamlit PIPELINE_FACTORY_APP
-  root_location = '@your_stage/apps/streamlit'
+  root_location = '@APP_STAGE/apps/streamlit'
   query_warehouse = PIPELINE_WH
   main_file = 'app.py';
 ```
+
+3) Open PIPELINE_FACTORY_APP in Snowsight and run it. The app uses the active session via `get_active_session()` and your current role/warehouse.
 
 ## Local dev (optional)
 ```bash
@@ -44,3 +59,4 @@ Set env vars for Snowflake connection (local):
 ## Notes
 - The app only writes to `PIPELINE_CONFIG`; object creation is delegated to the existing factory SP + DT orchestrator.
 - Adjust allowlists and default warehouse as needed in `config.py`.
+- In Snowflake deployment, the app uses the active Snowflake session; locally it reads connection info from environment variables.

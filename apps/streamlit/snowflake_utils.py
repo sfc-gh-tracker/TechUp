@@ -2,26 +2,29 @@ from __future__ import annotations
 from typing import Dict, List, Tuple
 import os
 import re
-import sqlparse
 from snowflake.snowpark import Session
+from snowflake.snowpark.context import get_active_session
 
 READ_ONLY_PATTERN = re.compile(r"\b(insert|update|delete|merge|create|alter|drop|truncate|grant|revoke|call)\b", re.I)
 
 
 def get_session() -> Session:
-    # For local dev, rely on env vars; in Snowflake Streamlit, use default context
-    if os.getenv("SNOWFLAKE_ACCOUNT"):
-        conn_params = {
-            "account": os.getenv("SNOWFLAKE_ACCOUNT"),
-            "user": os.getenv("SNOWFLAKE_USER"),
-            "password": os.getenv("SNOWFLAKE_PASSWORD"),
-            "role": os.getenv("SNOWFLAKE_ROLE"),
-            "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE"),
-            "database": os.getenv("SNOWFLAKE_DATABASE"),
-            "schema": os.getenv("SNOWFLAKE_SCHEMA"),
-        }
-        return Session.builder.configs(conn_params).create()
-    return Session.builder.getOrCreate()
+    # In Snowflake Streamlit, use active session; otherwise build from env for local dev
+    try:
+        return get_active_session()
+    except Exception:
+        if os.getenv("SNOWFLAKE_ACCOUNT"):
+            conn_params = {
+                "account": os.getenv("SNOWFLAKE_ACCOUNT"),
+                "user": os.getenv("SNOWFLAKE_USER"),
+                "password": os.getenv("SNOWFLAKE_PASSWORD"),
+                "role": os.getenv("SNOWFLAKE_ROLE"),
+                "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE"),
+                "database": os.getenv("SNOWFLAKE_DATABASE"),
+                "schema": os.getenv("SNOWFLAKE_SCHEMA"),
+            }
+            return Session.builder.configs(conn_params).create()
+        return Session.builder.getOrCreate()
 
 
 def list_tables(session: Session, database: str | None = None, schema: str | None = None) -> List[Tuple[str, str, str]]:
@@ -58,11 +61,13 @@ def fetch_schema_card(session: Session, table_fqns: List[str]) -> str:
 
 
 def is_single_select(sql_text: str) -> bool:
-    parsed = sqlparse.parse(sql_text)
-    if len(parsed) != 1:
-        return False
-    stmt = parsed[0]
-    return stmt.get_type() == "SELECT" and ";" not in sql_text
+    # Lightweight validation to avoid sqlparse dependency
+    s = sql_text.strip().rstrip(";")
+    # Must start with SELECT (allow leading WITH CTE)
+    starts_ok = s[:6].lower() == "select" or s[:4].lower() == "with"
+    # Reject multiple statements by stray semicolons
+    has_semicolon = ";" in sql_text
+    return starts_ok and not has_semicolon
 
 
 def enforce_read_only(sql_text: str) -> bool:
