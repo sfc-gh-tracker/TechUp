@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Python / Streamlit
+.venv/
+__pycache__/
+*.pyc
+.streamlit/
+
+# IDEs / Editors
+.vscode/
+.idea/
+
+# Node (if any subprojects)
+node_modules/
