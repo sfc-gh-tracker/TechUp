@@ -15,6 +15,7 @@ CORTEX_MODEL = "mistral-large"
 FEW_SHOTS: List[str] = [
     "You are a SQL assistant for Snowflake. Only output a single SELECT statement with fully qualified identifiers. No DML/DDL, no comments.",
 ]
+MAX_GENERATION_ATTEMPTS = 3
 
 # ------------------------------
 # Inlined utility functions
@@ -96,6 +97,50 @@ def insert_pipeline_config(session: Session, pipeline_id: str, target_dt_name: s
         )
     """
     session.sql(sql).collect()
+
+
+def try_generate_and_preview(session: Session, model: str, system: str, schema_card: str, user_prompt: str, preview_limit: int = 2, max_attempts: int = 3):
+    errors: List[str] = []
+    for attempt in range(1, max_attempts + 1):
+        full_prompt = f"""
+You are a Snowflake SQL assistant.
+Only output a single SELECT query. Do not include comments or extra text.
+Use fully qualified identifiers. Do not include LIMIT; the caller will apply it.
+You may only reference these tables:
+{schema_card}
+
+User request:
+{user_prompt}
+"""
+        try:
+            res = session.sql(
+                f"select snowflake.cortex.complete('{model}', $$ {system}\n\n{full_prompt} $$) as c"
+            ).collect()[0][0]
+        except Exception as e:
+            errors.append(f"Model call failed (attempt {attempt}): {e}")
+            continue
+
+        sql_text = normalize_model_sql(res)
+
+        if not is_single_select(sql_text):
+            errors.append(f"Generated SQL is not a single SELECT (attempt {attempt}).")
+            continue
+        if not enforce_read_only(sql_text):
+            errors.append(f"Generated SQL is not read-only (attempt {attempt}).")
+            continue
+
+        try:
+            rows = preview_query(session, sql_text, limit=preview_limit)
+        except Exception as e:
+            errors.append(f"Execution failed (attempt {attempt}): {e}")
+            continue
+
+        if rows and len(rows) > 0:
+            return True, sql_text, rows, errors
+        else:
+            errors.append(f"Query returned 0 rows (attempt {attempt}).")
+
+    return False, "", [], errors
 
 
 def strip_sql_comments(text: str) -> str:
@@ -210,33 +255,33 @@ if st.button("Generate SQL with Cortex", type="primary"):
     elif not prompt.strip():
         st.error("Please enter a prompt.")
     else:
-        with st.spinner("Calling Cortex..."):
+        with st.spinner("Generating and validating SQL..."):
             schema_card = fetch_schema_card(session, allowed_tables)
             system = "\n".join(FEW_SHOTS)
-            full_prompt = f"""
-You are a Snowflake SQL assistant.
-Only output a single SELECT query.
-Use fully qualified identifiers. Do not include comments or extra text.
-You may only reference these tables:
-{schema_card}
-
-User request:
-{prompt}
-"""
-            # Call Cortex via SQL function COMPLETE
-            res = session.sql(
-                f"select snowflake.cortex.complete('{CORTEX_MODEL}', $$ {system}\n\n{full_prompt} $$) as c"
-            ).collect()[0][0]
-            generated_sql = normalize_model_sql(res)
-
-        st.code(generated_sql, language="sql")
-        st.session_state["generated_sql"] = generated_sql
-        st.success("SQL generated. Validate and preview below.")
+            ok, generated_sql, preview_rows, errs = try_generate_and_preview(
+                session=session,
+                model=CORTEX_MODEL,
+                system=system,
+                schema_card=schema_card,
+                user_prompt=prompt,
+                preview_limit=2,
+                max_attempts=MAX_GENERATION_ATTEMPTS,
+            )
+        if ok:
+            st.code(generated_sql, language="sql")
+            st.session_state["generated_sql"] = generated_sql
+            st.success("SQL validated and returns rows. Preview below.")
+            st.dataframe([row.as_dict() for row in preview_rows], use_container_width=True)
+        else:
+            st.error("Failed to generate executable SQL that returns rows after multiple attempts.")
+            with st.expander("Details"):
+                for e in errs:
+                    st.write("- " + e)
 
 if "generated_sql" in st.session_state:
     sql_text = st.session_state["generated_sql"]
 
-    st.subheader("Validation")
+    st.subheader("Validation & Preview")
     col1, col2 = st.columns(2)
     with col1:
         is_select = is_single_select(sql_text)
@@ -252,13 +297,15 @@ if "generated_sql" in st.session_state:
             st.error(f"Explain failed: {e}")
             explain_ok = False
 
-    st.subheader("Preview")
     preview_ok = False
     if is_select and is_ro and explain_ok:
         try:
-            rows = preview_query(session, sql_text, limit=PREVIEW_LIMIT)
-            st.dataframe([row.as_dict() for row in rows], use_container_width=True)
-            preview_ok = True
+            rows = preview_query(session, sql_text, limit=2)
+            if rows:
+                st.dataframe([row.as_dict() for row in rows], use_container_width=True)
+                preview_ok = True
+            else:
+                st.info("Query returned 0 rows.")
         except Exception as e:
             st.error(f"Preview failed: {e}")
 
