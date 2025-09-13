@@ -1,18 +1,99 @@
 import streamlit as st
 from typing import List
+import os
+import re
 from snowflake.snowpark import Session
-from snowflake.snowpark.functions import call_function
-from snowflake_utils import (
-    get_session,
-    list_tables,
-    fetch_schema_card,
-    is_single_select,
-    enforce_read_only,
-    preview_query,
-    explain_query,
-    insert_pipeline_config,
-)
-from config import DEFAULT_WAREHOUSE, ALLOWED_TABLES, PREVIEW_LIMIT, CORTEX_MODEL, FEW_SHOTS
+from snowflake.snowpark.context import get_active_session
+
+# ------------------------------
+# Inlined config/constants
+# ------------------------------
+DEFAULT_WAREHOUSE = "PIPELINE_WH"
+ALLOWED_TABLES = set()  # e.g., {"RAW.SALES.ORDERS", "RAW.CRM.CUSTOMERS"}
+PREVIEW_LIMIT = 50
+CORTEX_MODEL = "mistral-large"
+FEW_SHOTS: List[str] = [
+    "You are a SQL assistant for Snowflake. Only output a single SELECT statement with fully qualified identifiers. No DML/DDL, no comments.",
+]
+
+# ------------------------------
+# Inlined utility functions
+# ------------------------------
+READ_ONLY_PATTERN = re.compile(r"\b(insert|update|delete|merge|create|alter|drop|truncate|grant|revoke|call)\b", re.I)
+
+
+def get_session() -> Session:
+    # Use active session in Snowflake Streamlit; for local dev, build from env
+    try:
+        return get_active_session()
+    except Exception:
+        if os.getenv("SNOWFLAKE_ACCOUNT"):
+            from snowflake.snowpark import Session as _Session
+
+            conn_params = {
+                "account": os.getenv("SNOWFLAKE_ACCOUNT"),
+                "user": os.getenv("SNOWFLAKE_USER"),
+                "password": os.getenv("SNOWFLAKE_PASSWORD"),
+                "role": os.getenv("SNOWFLAKE_ROLE"),
+                "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE"),
+                "database": os.getenv("SNOWFLAKE_DATABASE"),
+                "schema": os.getenv("SNOWFLAKE_SCHEMA"),
+            }
+            return _Session.builder.configs(conn_params).create()
+        from snowflake.snowpark import Session as _Session
+
+        return _Session.builder.getOrCreate()
+
+
+def fetch_schema_card(session: Session, table_fqns: List[str]) -> str:
+    if not table_fqns:
+        return ""
+    parts = []
+    for fqn in table_fqns:
+        db, sch, tbl = fqn.split(".")
+        rows = session.sql(
+            f"""
+            select column_name, data_type
+            from {db}.information_schema.columns
+            where table_schema = '{sch}' and table_name = '{tbl}'
+            order by ordinal_position
+            """
+        ).collect()
+        cols = ", ".join([f"{r['COLUMN_NAME']} {r['DATA_TYPE']}" for r in rows])
+        parts.append(f"- {fqn}: {cols}")
+    return "\n".join(parts)
+
+
+def is_single_select(sql_text: str) -> bool:
+    s = sql_text.strip().rstrip(";")
+    starts_ok = s[:6].lower() == "select" or s[:4].lower() == "with"
+    has_semicolon = ";" in sql_text
+    return starts_ok and not has_semicolon
+
+
+def enforce_read_only(sql_text: str) -> bool:
+    return READ_ONLY_PATTERN.search(sql_text) is None
+
+
+def preview_query(session: Session, sql_text: str, limit: int = 50):
+    limited = f"select * from ( {sql_text} ) limit {limit}"
+    return session.sql(limited).collect()
+
+
+def explain_query(session: Session, sql_text: str) -> str:
+    result = session.sql(f"explain using text {sql_text}").collect()
+    return "\n".join([r[0] for r in result])
+
+
+def insert_pipeline_config(session: Session, pipeline_id: str, target_dt_name: str, lag_minutes: int, warehouse: str, sql_select: str, source_hint: str) -> None:
+    sql = f"""
+        insert into PIPELINE_CONFIG (
+          pipeline_id, source_table_name, transformation_sql_snippet, target_dt_name, lag_minutes, warehouse, status
+        ) values (
+          '{pipeline_id}', '{source_hint}', $$ {sql_select} $$, '{target_dt_name}', {lag_minutes}, '{warehouse}', 'PENDING'
+        )
+    """
+    session.sql(sql).collect()
 
 st.set_page_config(page_title="Pipeline Factory", layout="wide")
 
