@@ -13,7 +13,13 @@ from snowflake.snowpark import Session
 
 def quote_identifier(identifier: str) -> str:
     parts = [p.strip() for p in identifier.split('.')]
-    return '.'.join([f'"{p.replace("\"", "\"\"")}"' for p in parts if p])
+    quoted_parts = []
+    for p in parts:
+        if not p:
+            continue
+        p_safe = p.replace('"', '""')
+        quoted_parts.append('"' + p_safe + '"')
+    return '.'.join(quoted_parts)
 
 def quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
