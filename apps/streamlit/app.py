@@ -65,10 +65,12 @@ def fetch_schema_card(session: Session, table_fqns: List[str]) -> str:
 
 
 def is_single_select(sql_text: str) -> bool:
-    s = sql_text.strip().rstrip(";")
-    starts_ok = s[:6].lower() == "select" or s[:4].lower() == "with"
-    has_semicolon = ";" in sql_text
-    return starts_ok and not has_semicolon
+    s_no_comments = strip_sql_comments(sql_text)
+    s = s_no_comments.strip()
+    s = s.rstrip(";")
+    starts = s.lstrip().lower()
+    starts_ok = starts.startswith("select") or starts.startswith("with")
+    return starts_ok and not has_unquoted_semicolon(s_no_comments)
 
 
 def enforce_read_only(sql_text: str) -> bool:
@@ -94,6 +96,61 @@ def insert_pipeline_config(session: Session, pipeline_id: str, target_dt_name: s
         )
     """
     session.sql(sql).collect()
+
+
+def strip_sql_comments(text: str) -> str:
+    # Remove -- line comments and /* */ block comments (not inside quotes)
+    def _remove_block_comments(s: str) -> str:
+        return re.sub(r"/\*[^*]*\*+(?:[^/*][^*]*\*+)*/", " ", s, flags=re.S)
+
+    def _remove_line_comments(s: str) -> str:
+        lines = []
+        for line in s.splitlines():
+            if "--" in line:
+                idx = line.find("--")
+                lines.append(line[:idx])
+            else:
+                lines.append(line)
+        return "\n".join(lines)
+
+    return _remove_line_comments(_remove_block_comments(text))
+
+
+def has_unquoted_semicolon(text: str) -> bool:
+    in_single = False
+    in_double = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "'" and not in_double:
+            # Handle escaped single quotes inside strings by doubling ''
+            if in_single and i + 1 < len(text) and text[i + 1] == "'":
+                i += 2
+                continue
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif ch == ";" and not in_single and not in_double:
+            return True
+        i += 1
+    return False
+
+
+def normalize_model_sql(text: str) -> str:
+    # Extract content from triple backticks if present
+    m = re.search(r"```(?:sql)?\s*([\s\S]*?)```", text, flags=re.I)
+    if m:
+        text = m.group(1)
+    # Remove single backticks wrappers
+    text = text.strip().strip("`")
+    # Remove leading language hints like sql\n
+    text = re.sub(r"^(?i:sql)\n", "", text)
+    # Trim comments/fences leftovers
+    text = strip_sql_comments(text).strip()
+    # Drop trailing semicolon (only one statement expected)
+    if text.endswith(";"):
+        text = text[:-1]
+    return text.strip()
 
 
 def list_databases(session: Session) -> List[str]:
@@ -170,7 +227,7 @@ User request:
             res = session.sql(
                 f"select snowflake.cortex.complete('{CORTEX_MODEL}', $$ {system}\n\n{full_prompt} $$) as c"
             ).collect()[0][0]
-            generated_sql = res.strip().strip('`')
+            generated_sql = normalize_model_sql(res)
 
         st.code(generated_sql, language="sql")
         st.session_state["generated_sql"] = generated_sql
