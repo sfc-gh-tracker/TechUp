@@ -8,16 +8,11 @@ select count(*) as pending_count
 from PIPELINE_CONFIG
 where status = 'PENDING';
 
--- 2) Orchestrator Task (DTs cannot call procedures/system functions)
 create or replace task PIPELINE_ORCHESTRATOR_TASK
 warehouse = PIPELINE_WH
 schedule = 'USING CRON * * * * * UTC'
 as
-begin
-  if (select count(*) from PIPELINE_CONFIG where status = 'PENDING') > 0 then
-    call RUN_PIPELINE_FACTORY();
-  end if;
-end;
+call RUN_PIPELINE_FACTORY();
 
 -- Enable the task
 alter task PIPELINE_ORCHESTRATOR_TASK resume;
