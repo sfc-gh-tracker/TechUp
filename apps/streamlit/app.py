@@ -95,6 +95,25 @@ def insert_pipeline_config(session: Session, pipeline_id: str, target_dt_name: s
     """
     session.sql(sql).collect()
 
+
+def list_databases(session: Session) -> List[str]:
+    rows = session.sql(
+        "select database_name from snowflake.information_schema.databases order by 1"
+    ).collect()
+    return [r[0] for r in rows]
+
+
+def list_tables_in_db(session: Session, database_name: str) -> List[tuple[str, str]]:
+    rows = session.sql(
+        f"""
+        select table_schema, table_name
+        from {database_name}.information_schema.tables
+        where table_type = 'BASE TABLE'
+        order by 1, 2
+        """
+    ).collect()
+    return [(r[0], r[1]) for r in rows]
+
 st.set_page_config(page_title="Pipeline Factory", layout="wide")
 
 @st.cache_resource(show_spinner=False)
@@ -106,14 +125,19 @@ session = _get_session()
 st.title("Prompt → SQL → Dynamic Table")
 
 with st.expander("Scope & Options", expanded=True):
-    st.caption("Choose tables to ground the model. Fewer tables = better accuracy.")
-    # Allow manual entry of allowed tables for now
-    allowed_tables_input = st.text_input(
-        "Allowed tables (comma-separated, fully qualified DB.SCHEMA.TABLE)",
-        value=", ".join(ALLOWED_TABLES) if ALLOWED_TABLES else "",
-        placeholder="RAW.SALES.ORDERS, RAW.CRM.CUSTOMERS",
-    )
-    allowed_tables = [t.strip() for t in allowed_tables_input.split(",") if t.strip()]
+    st.caption("Choose scope and tables to ground the model. Fewer tables = better accuracy.")
+
+    # Database selection
+    db_list = list_databases(session)
+    selected_db = st.selectbox("Database", options=db_list, index=0 if db_list else None)
+
+    # Tables selection from selected database
+    allowed_tables: List[str] = []
+    if selected_db:
+        table_rows = list_tables_in_db(session, selected_db)
+        formatted = [f"{selected_db}.{sch}.{tbl}" for sch, tbl in table_rows]
+        picked = st.multiselect("Tables", options=formatted, default=[])
+        allowed_tables = picked
 
     default_wh = st.text_input("Warehouse", value=DEFAULT_WAREHOUSE)
     target_dt_name = st.text_input("Target Dynamic Table name (DB.SCHEMA.NAME)")
