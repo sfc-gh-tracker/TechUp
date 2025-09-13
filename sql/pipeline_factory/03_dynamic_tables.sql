@@ -8,18 +8,19 @@ select count(*) as pending_count
 from PIPELINE_CONFIG
 where status = 'PENDING';
 
--- 2) Orchestrator DT
-create or replace dynamic table PIPELINE_ORCHESTRATOR_DT
+-- 2) Orchestrator Task (DTs cannot call procedures/system functions)
+create or replace task PIPELINE_ORCHESTRATOR_TASK
 warehouse = PIPELINE_WH
-lag = '1 minute'
+schedule = 'USING CRON * * * * * UTC'
 as
-select
-  case
-    when p.pending_count > 0 then system$call('RUN_PIPELINE_FACTORY')
-    else 'NOOP'
-  end as orchestration_result,
-  current_timestamp() as triggered_at
-from PENDING_PIPELINES_DT p;
+begin
+  if (select count(*) from PIPELINE_CONFIG where status = 'PENDING') > 0 then
+    call RUN_PIPELINE_FACTORY();
+  end if;
+end;
+
+-- Enable the task
+alter task PIPELINE_ORCHESTRATOR_TASK resume;
 
 -- 3) Health Monitor DT
 create or replace dynamic table PIPELINE_HEALTH_MONITOR_DT
