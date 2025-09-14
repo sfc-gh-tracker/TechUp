@@ -12,23 +12,8 @@ DEFAULT_WAREHOUSE = "PIPELINE_WH"
 # Deprecated: explicit table allowlist via UI (kept for compatibility)
 ALLOWED_TABLES = set()  # e.g., {"RAW.SALES.ORDERS", "RAW.CRM.CUSTOMERS"}
 PREVIEW_LIMIT = 50
-CORTEX_MODEL = "mistral-large"
-FEW_SHOTS: List[str] = [
-    """You are an expert Snowflake SQL assistant. Follow these rules:
-1. Only output a single SELECT statement
-2. Use fully qualified table names (DATABASE.SCHEMA.TABLE)
-3. Always include WHERE clauses to filter data meaningfully
-4. Use appropriate JOINs when multiple tables are needed
-5. Include realistic sample data filters (like date ranges, status filters, etc.)
-6. No comments, explanations, or markdown formatting
-7. Ensure the query will return actual rows from real data
-
-Example patterns:
-- For "latest orders": SELECT * FROM DB.SCHEMA.ORDERS WHERE ORDER_DATE >= CURRENT_DATE - 30
-- For "customer analysis": SELECT C.*, COUNT(O.ORDER_ID) FROM DB.SCHEMA.CUSTOMERS C LEFT JOIN DB.SCHEMA.ORDERS O ON C.ID = O.CUSTOMER_ID GROUP BY C.ID
-- Always add realistic filters to avoid empty results""",
-]
-MAX_GENERATION_ATTEMPTS = 5
+# Snowflake Copilot integration (replaces custom Cortex approach)
+MAX_GENERATION_ATTEMPTS = 3
 
 # ------------------------------
 # Inlined utility functions
@@ -112,66 +97,99 @@ def insert_pipeline_config(session: Session, pipeline_id: str, target_dt_name: s
     session.sql(sql).collect()
 
 
-def try_generate_and_preview(session: Session, model: str, system: str, schema_card: str, user_prompt: str, preview_limit: int = 2, max_attempts: int = 5):
+def generate_sql_with_copilot(session: Session, user_prompt: str, database: str, schema: str, preview_limit: int = 2, max_attempts: int = 3):
+    """Use Snowflake Copilot to generate SQL from natural language"""
     errors: List[str] = []
+    
+    # Set context for Copilot
+    try:
+        session.sql(f"USE DATABASE {database}").collect()
+        session.sql(f"USE SCHEMA {schema}").collect()
+    except Exception as e:
+        errors.append(f"Failed to set database/schema context: {e}")
+        return False, "", [], errors
+    
     for attempt in range(1, max_attempts + 1):
-        # Enhanced prompting with more context and examples
-        attempt_context = ""
-        if attempt > 1:
-            attempt_context = f"""
-PREVIOUS ATTEMPTS FAILED. Common issues to avoid:
-- Empty result sets (add WHERE clauses with realistic filters)
-- Invalid table/column references (check schema carefully)
-- Syntax errors (verify JOIN conditions and column names)
-
-This is attempt {attempt}/{max_attempts}. Be more conservative and add filters.
-"""
-        
-        full_prompt = f"""
-{attempt_context}
-Available tables and columns in your scope:
-{schema_card}
-
-IMPORTANT: 
-- Use ONLY the tables and columns listed above
-- Add WHERE clauses to ensure results (like date filters, status filters, etc.)
-- Use realistic sample conditions that would exist in real data
-- For date columns, try filters like: WHERE date_col >= CURRENT_DATE - 30
-- For status columns, try filters like: WHERE status = 'ACTIVE' OR status IN ('PENDING', 'COMPLETE')
-
-User request: {user_prompt}
-
-Generate a single SELECT statement that will return actual rows:
-"""
         try:
-            res = session.sql(
-                f"select snowflake.cortex.complete('{model}', $$ {system}\n\n{full_prompt} $$) as c"
-            ).collect()[0][0]
+            # Use Snowflake Copilot's SYSTEM$COPILOT function to generate SQL
+            # This leverages Copilot's built-in understanding of your data structure
+            copilot_prompt = f"""Generate a SQL query for this request: {user_prompt}
+            
+Please ensure the query:
+- Returns actual data rows
+- Uses appropriate filters to avoid empty results
+- Follows SQL best practices
+- Only uses tables from the current database and schema context"""
+            
+            result = session.sql(f"""
+                SELECT SYSTEM$COPILOT('{copilot_prompt}') as generated_sql
+            """).collect()
+            
+            if not result:
+                errors.append(f"Copilot returned no response (attempt {attempt})")
+                continue
+                
+            # Extract SQL from Copilot response
+            copilot_response = result[0][0]
+            sql_text = extract_sql_from_copilot_response(copilot_response)
+            
+            if not sql_text:
+                errors.append(f"Could not extract SQL from Copilot response (attempt {attempt})")
+                continue
+                
+            # Validate the generated SQL
+            if not is_single_select(sql_text):
+                errors.append(f"Generated SQL is not a single SELECT (attempt {attempt})")
+                continue
+                
+            if not enforce_read_only(sql_text):
+                errors.append(f"Generated SQL is not read-only (attempt {attempt})")
+                continue
+            
+            # Test execution
+            try:
+                rows = preview_query(session, sql_text, limit=preview_limit)
+                if rows and len(rows) > 0:
+                    return True, sql_text, rows, errors
+                else:
+                    errors.append(f"Query returned 0 rows (attempt {attempt})")
+            except Exception as e:
+                errors.append(f"Execution failed (attempt {attempt}): {e}")
+                continue
+                
         except Exception as e:
-            errors.append(f"Model call failed (attempt {attempt}): {e}")
+            errors.append(f"Copilot call failed (attempt {attempt}): {e}")
             continue
-
-        sql_text = normalize_model_sql(res)
-
-        if not is_single_select(sql_text):
-            errors.append(f"Generated SQL is not a single SELECT (attempt {attempt}).")
-            continue
-        if not enforce_read_only(sql_text):
-            errors.append(f"Generated SQL is not read-only (attempt {attempt}).")
-            continue
-
-        try:
-            rows = preview_query(session, sql_text, limit=preview_limit)
-        except Exception as e:
-            errors.append(f"Execution failed (attempt {attempt}): {e}")
-            continue
-
-        if rows and len(rows) > 0:
-            return True, sql_text, rows, errors
-        else:
-            errors.append(f"Query returned 0 rows (attempt {attempt}). Try adding WHERE clauses with realistic filters.")
-
+    
     return False, "", [], errors
+
+
+def extract_sql_from_copilot_response(response: str) -> str:
+    """Extract SQL from Snowflake Copilot's response"""
+    if not response:
+        return ""
+    
+    # Copilot often returns structured responses - extract the SQL portion
+    # Look for SQL code blocks or statements
+    sql_patterns = [
+        r'```sql\s*(.*?)\s*```',  # SQL code blocks
+        r'```\s*(SELECT.*?)\s*```',  # Generic code blocks with SELECT
+        r'(SELECT[\s\S]*?)(?:\n\n|\Z)',  # Direct SELECT statements
+    ]
+    
+    for pattern in sql_patterns:
+        match = re.search(pattern, response, re.IGNORECASE | re.DOTALL)
+        if match:
+            sql = match.group(1).strip()
+            if sql and sql.upper().startswith('SELECT'):
+                return sql
+    
+    # Fallback: if response looks like SQL, return it
+    clean_response = response.strip()
+    if clean_response.upper().startswith('SELECT'):
+        return clean_response
+    
+    return ""
 
 
 def strip_sql_comments(text: str) -> str:
@@ -320,47 +338,38 @@ session = _get_session()
 st.title("Prompt → SQL → Dynamic Table")
 
 with st.expander("Scope & Options", expanded=True):
-    st.caption("Select a database and schema. The model will choose applicable tables.")
+    st.caption("Select database and schema for Snowflake Copilot context.")
 
     # Database selection
     db_list = list_databases(session)
     selected_db = st.selectbox("Database", options=db_list, index=0 if db_list else None)
 
-    # Schema multiselect in selected database
-    selected_schemas = []
+    # Single schema selection (Copilot works better with focused context)
+    selected_schema = None
     if selected_db:
         schema_list = list_schemas_in_db(session, selected_db)
-        selected_schemas = st.multiselect("Schemas", options=schema_list, default=[])
+        selected_schema = st.selectbox("Schema", options=schema_list, index=0 if schema_list else None)
 
     default_wh = st.text_input("Warehouse", value=DEFAULT_WAREHOUSE)
     target_dt_name = st.text_input("Target Dynamic Table name (DB.SCHEMA.NAME)")
     lag_minutes = st.number_input("Lag (minutes)", min_value=1, max_value=1440, value=10)
     pipeline_id = st.text_input("Pipeline ID", placeholder="orders_complete_nlp")
 
-st.subheader("Describe the data")
-prompt = st.text_area("Prompt", height=140, placeholder="Show the latest order per customer in the last 30 days")
+st.subheader("Describe the data you need")
+prompt = st.text_area("Natural language request", height=140, placeholder="Show me the top 10 customers by revenue in the last quarter")
 
-if st.button("Generate SQL with Cortex", type="primary"):
-    if not selected_db or not selected_schemas:
-        st.error("Please select a database and at least one schema.")
+if st.button("Generate SQL with Copilot", type="primary"):
+    if not selected_db or not selected_schema:
+        st.error("Please select a database and schema.")
     elif not prompt.strip():
-        st.error("Please enter a prompt.")
+        st.error("Please enter your data request.")
     else:
-        with st.spinner("Generating and validating SQL..."):
-            # Build schema card for selected database + schemas
-            schema_cards = []
-            for schema in selected_schemas:
-                card = fetch_schema_card_for_schema(session, selected_db, schema)
-                if card:
-                    schema_cards.append(card)
-            schema_card = "\n".join(schema_cards)
-            system = "\n".join(FEW_SHOTS)
-            ok, generated_sql, preview_rows, errs = try_generate_and_preview(
+        with st.spinner("Asking Snowflake Copilot..."):
+            ok, generated_sql, preview_rows, errs = generate_sql_with_copilot(
                 session=session,
-                model=CORTEX_MODEL,
-                system=system,
-                schema_card=schema_card,
                 user_prompt=prompt,
+                database=selected_db,
+                schema=selected_schema,
                 preview_limit=2,
                 max_attempts=MAX_GENERATION_ATTEMPTS,
             )
@@ -370,22 +379,23 @@ if st.button("Generate SQL with Cortex", type="primary"):
             st.success("SQL validated and returns rows. Preview below.")
             st.dataframe([row.as_dict() for row in preview_rows], use_container_width=True)
         else:
-            st.error("Failed to generate executable SQL that returns rows after multiple attempts.")
+            st.error("Snowflake Copilot couldn't generate working SQL.")
             with st.expander("Troubleshooting Details"):
-                st.write("**Common issues and solutions:**")
-                st.write("- **Empty tables**: Your selected schemas may have no data or test data")
-                st.write("- **Column names**: Check if your prompt references columns that exist")
-                st.write("- **Filters needed**: Try more specific prompts like 'active customers from last 30 days'")
-                st.write("- **Schema scope**: Try selecting fewer schemas or different schemas with known data")
+                st.write("**Possible issues:**")
+                st.write("- **Copilot access**: Ensure you have COPILOT_USER role privileges")
+                st.write("- **Empty data**: Selected schema may have no data to query")
+                st.write("- **Ambiguous request**: Try being more specific about what data you want")
+                st.write("- **Table names**: Copilot may not recognize table/column references in your prompt")
                 st.write("")
-                st.write("**Attempt details:**")
+                st.write("**Error details:**")
                 for e in errs:
                     st.write("- " + e)
                 st.write("")
-                st.write("**Suggestions:**")
-                st.write("- Try a simpler query like 'show me 10 rows from [table name]'")
-                st.write("- Be more specific about date ranges or status filters")
-                st.write("- Check if the selected schemas contain actual data")
+                st.write("**Try these prompts:**")
+                st.write("- 'Show me all tables in this schema'")
+                st.write("- 'What columns are in the [table_name] table?'")
+                st.write("- 'Get the first 10 rows from [table_name]'")
+                st.write("- 'Show recent records from [table_name] where [column] is not null'")
 
 if "generated_sql" in st.session_state:
     sql_text = st.session_state["generated_sql"]
