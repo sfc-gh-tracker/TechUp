@@ -14,9 +14,21 @@ ALLOWED_TABLES = set()  # e.g., {"RAW.SALES.ORDERS", "RAW.CRM.CUSTOMERS"}
 PREVIEW_LIMIT = 50
 CORTEX_MODEL = "mistral-large"
 FEW_SHOTS: List[str] = [
-    "You are a SQL assistant for Snowflake. Only output a single SELECT statement with fully qualified identifiers. No DML/DDL, no comments.",
+    """You are an expert Snowflake SQL assistant. Follow these rules:
+1. Only output a single SELECT statement
+2. Use fully qualified table names (DATABASE.SCHEMA.TABLE)
+3. Always include WHERE clauses to filter data meaningfully
+4. Use appropriate JOINs when multiple tables are needed
+5. Include realistic sample data filters (like date ranges, status filters, etc.)
+6. No comments, explanations, or markdown formatting
+7. Ensure the query will return actual rows from real data
+
+Example patterns:
+- For "latest orders": SELECT * FROM DB.SCHEMA.ORDERS WHERE ORDER_DATE >= CURRENT_DATE - 30
+- For "customer analysis": SELECT C.*, COUNT(O.ORDER_ID) FROM DB.SCHEMA.CUSTOMERS C LEFT JOIN DB.SCHEMA.ORDERS O ON C.ID = O.CUSTOMER_ID GROUP BY C.ID
+- Always add realistic filters to avoid empty results""",
 ]
-MAX_GENERATION_ATTEMPTS = 3
+MAX_GENERATION_ATTEMPTS = 5
 
 # ------------------------------
 # Inlined utility functions
@@ -100,18 +112,36 @@ def insert_pipeline_config(session: Session, pipeline_id: str, target_dt_name: s
     session.sql(sql).collect()
 
 
-def try_generate_and_preview(session: Session, model: str, system: str, schema_card: str, user_prompt: str, preview_limit: int = 2, max_attempts: int = 3):
+def try_generate_and_preview(session: Session, model: str, system: str, schema_card: str, user_prompt: str, preview_limit: int = 2, max_attempts: int = 5):
     errors: List[str] = []
     for attempt in range(1, max_attempts + 1):
+        # Enhanced prompting with more context and examples
+        attempt_context = ""
+        if attempt > 1:
+            attempt_context = f"""
+PREVIOUS ATTEMPTS FAILED. Common issues to avoid:
+- Empty result sets (add WHERE clauses with realistic filters)
+- Invalid table/column references (check schema carefully)
+- Syntax errors (verify JOIN conditions and column names)
+
+This is attempt {attempt}/{max_attempts}. Be more conservative and add filters.
+"""
+        
         full_prompt = f"""
-You are a Snowflake SQL assistant.
-Only output a single SELECT query. Do not include comments or extra text.
-Use fully qualified identifiers. Do not include LIMIT; the caller will apply it.
-You may only reference these tables:
+{attempt_context}
+Available tables and columns in your scope:
 {schema_card}
 
-User request:
-{user_prompt}
+IMPORTANT: 
+- Use ONLY the tables and columns listed above
+- Add WHERE clauses to ensure results (like date filters, status filters, etc.)
+- Use realistic sample conditions that would exist in real data
+- For date columns, try filters like: WHERE date_col >= CURRENT_DATE - 30
+- For status columns, try filters like: WHERE status = 'ACTIVE' OR status IN ('PENDING', 'COMPLETE')
+
+User request: {user_prompt}
+
+Generate a single SELECT statement that will return actual rows:
 """
         try:
             res = session.sql(
@@ -139,7 +169,7 @@ User request:
         if rows and len(rows) > 0:
             return True, sql_text, rows, errors
         else:
-            errors.append(f"Query returned 0 rows (attempt {attempt}).")
+            errors.append(f"Query returned 0 rows (attempt {attempt}). Try adding WHERE clauses with realistic filters.")
 
     return False, "", [], errors
 
@@ -341,9 +371,21 @@ if st.button("Generate SQL with Cortex", type="primary"):
             st.dataframe([row.as_dict() for row in preview_rows], use_container_width=True)
         else:
             st.error("Failed to generate executable SQL that returns rows after multiple attempts.")
-            with st.expander("Details"):
+            with st.expander("Troubleshooting Details"):
+                st.write("**Common issues and solutions:**")
+                st.write("- **Empty tables**: Your selected schemas may have no data or test data")
+                st.write("- **Column names**: Check if your prompt references columns that exist")
+                st.write("- **Filters needed**: Try more specific prompts like 'active customers from last 30 days'")
+                st.write("- **Schema scope**: Try selecting fewer schemas or different schemas with known data")
+                st.write("")
+                st.write("**Attempt details:**")
                 for e in errs:
                     st.write("- " + e)
+                st.write("")
+                st.write("**Suggestions:**")
+                st.write("- Try a simpler query like 'show me 10 rows from [table name]'")
+                st.write("- Be more specific about date ranges or status filters")
+                st.write("- Check if the selected schemas contain actual data")
 
 if "generated_sql" in st.session_state:
     sql_text = st.session_state["generated_sql"]
