@@ -9,6 +9,7 @@ from snowflake.snowpark.context import get_active_session
 # Inlined config/constants
 # ------------------------------
 DEFAULT_WAREHOUSE = "PIPELINE_WH"
+# Deprecated: explicit table allowlist via UI (kept for compatibility)
 ALLOWED_TABLES = set()  # e.g., {"RAW.SALES.ORDERS", "RAW.CRM.CUSTOMERS"}
 PREVIEW_LIMIT = 50
 CORTEX_MODEL = "mistral-large"
@@ -205,6 +206,13 @@ def list_databases(session: Session) -> List[str]:
     return [r[0] for r in rows]
 
 
+def list_schemas_in_db(session: Session, database_name: str) -> List[str]:
+    rows = session.sql(
+        f"select schema_name from {database_name}.information_schema.schemata order by 1"
+    ).collect()
+    return [r[0] for r in rows]
+
+
 def list_tables_in_db(session: Session, database_name: str) -> List[tuple[str, str]]:
     rows = session.sql(
         f"""
@@ -215,6 +223,61 @@ def list_tables_in_db(session: Session, database_name: str) -> List[tuple[str, s
         """
     ).collect()
     return [(r[0], r[1]) for r in rows]
+
+
+def list_tables_in_schema(session: Session, database_name: str, schema_name: str) -> List[str]:
+    rows = session.sql(
+        f"""
+        select table_name
+        from {database_name}.information_schema.tables
+        where table_type = 'BASE TABLE' and table_schema = '{schema_name}'
+        order by 1
+        """
+    ).collect()
+    return [r[0] for r in rows]
+
+
+def fetch_schema_card_for_schema(session: Session, database_name: str, schema_name: str, max_tables: int = 50, max_cols: int = 30) -> str:
+    # Build a compact schema card: per table, a list of columns and types
+    rows = session.sql(
+        f"""
+        select table_name, column_name, data_type
+        from {database_name}.information_schema.columns
+        where table_schema = '{schema_name}'
+        order by table_name, ordinal_position
+        """
+    ).collect()
+    card_lines: List[str] = []
+    current_table = None
+    cols: List[str] = []
+    tables_count = 0
+    for r in rows:
+        tbl = r[0]
+        col = r[1]
+        typ = r[2]
+        if current_table is None:
+            current_table = tbl
+        if tbl != current_table:
+            card_lines.append(f"- {database_name}.{schema_name}.{current_table}: "+ ", ".join(cols[:max_cols]))
+            tables_count += 1
+            if tables_count >= max_tables:
+                break
+            current_table = tbl
+            cols = []
+        cols.append(f"{col} {typ}")
+    # flush last table
+    if current_table is not None and tables_count < max_tables:
+        card_lines.append(f"- {database_name}.{schema_name}.{current_table}: "+ ", ".join(cols[:max_cols]))
+    return "\n".join(card_lines)
+
+
+def extract_primary_table(sql_text: str) -> str | None:
+    # Very simple extractor: find first FROM <identifier> (handles quoted identifiers and dots)
+    s = strip_sql_comments(sql_text)
+    m = re.search(r"from\s+((?:\"[^\"]+\"|[A-Za-z0-9_]+)(?:\.(?:\"[^\"]+\"|[A-Za-z0-9_]+)){0,2})", s, re.I)
+    if m:
+        return m.group(1)
+    return None
 
 st.set_page_config(page_title="Pipeline Factory", layout="wide")
 
@@ -227,19 +290,20 @@ session = _get_session()
 st.title("Prompt → SQL → Dynamic Table")
 
 with st.expander("Scope & Options", expanded=True):
-    st.caption("Choose scope and tables to ground the model. Fewer tables = better accuracy.")
+    st.caption("Select a database and schema. The model will choose applicable tables.")
 
     # Database selection
     db_list = list_databases(session)
     selected_db = st.selectbox("Database", options=db_list, index=0 if db_list else None)
 
-    # Tables selection from selected database
-    allowed_tables: List[str] = []
+    # Schema selection in selected database
+    selected_schema = None
     if selected_db:
-        table_rows = list_tables_in_db(session, selected_db)
-        formatted = [f"{selected_db}.{sch}.{tbl}" for sch, tbl in table_rows]
-        picked = st.multiselect("Tables", options=formatted, default=[])
-        allowed_tables = picked
+        schema_list = list_schemas_in_db(session, selected_db)
+        selected_schema = st.selectbox("Schema", options=schema_list, index=0 if schema_list else None)
+
+    # No explicit table selection; the schema card will inform the model
+    allowed_tables: List[str] = []
 
     default_wh = st.text_input("Warehouse", value=DEFAULT_WAREHOUSE)
     target_dt_name = st.text_input("Target Dynamic Table name (DB.SCHEMA.NAME)")
@@ -256,7 +320,8 @@ if st.button("Generate SQL with Cortex", type="primary"):
         st.error("Please enter a prompt.")
     else:
         with st.spinner("Generating and validating SQL..."):
-            schema_card = fetch_schema_card(session, allowed_tables)
+            # Build schema card for selected database + schema
+            schema_card = fetch_schema_card_for_schema(session, selected_db, selected_schema) if (selected_db and selected_schema) else ""
             system = "\n".join(FEW_SHOTS)
             ok, generated_sql, preview_rows, errs = try_generate_and_preview(
                 session=session,
@@ -316,8 +381,8 @@ if "generated_sql" in st.session_state:
 
     if st.button("Insert into PIPELINE_CONFIG (PENDING)", disabled=not can_create):
         try:
-            # Use first allowed table as source hint; the SP will use the full SELECT
-            source_hint = allowed_tables[0] if allowed_tables else "PUBLIC.DUAL"
+            # Derive a source hint from the primary table in the generated SQL, else use a placeholder
+            source_hint = extract_primary_table(sql_text) or "PUBLIC.DUAL"
             insert_pipeline_config(
                 session=session,
                 pipeline_id=pipeline_id,
