@@ -296,14 +296,11 @@ with st.expander("Scope & Options", expanded=True):
     db_list = list_databases(session)
     selected_db = st.selectbox("Database", options=db_list, index=0 if db_list else None)
 
-    # Schema selection in selected database
-    selected_schema = None
+    # Schema multiselect in selected database
+    selected_schemas = []
     if selected_db:
         schema_list = list_schemas_in_db(session, selected_db)
-        selected_schema = st.selectbox("Schema", options=schema_list, index=0 if schema_list else None)
-
-    # No explicit table selection; the schema card will inform the model
-    allowed_tables: List[str] = []
+        selected_schemas = st.multiselect("Schemas", options=schema_list, default=[])
 
     default_wh = st.text_input("Warehouse", value=DEFAULT_WAREHOUSE)
     target_dt_name = st.text_input("Target Dynamic Table name (DB.SCHEMA.NAME)")
@@ -314,14 +311,19 @@ st.subheader("Describe the data")
 prompt = st.text_area("Prompt", height=140, placeholder="Show the latest order per customer in the last 30 days")
 
 if st.button("Generate SQL with Cortex", type="primary"):
-    if not allowed_tables:
-        st.error("Please provide at least one allowed table.")
+    if not selected_db or not selected_schemas:
+        st.error("Please select a database and at least one schema.")
     elif not prompt.strip():
         st.error("Please enter a prompt.")
     else:
         with st.spinner("Generating and validating SQL..."):
-            # Build schema card for selected database + schema
-            schema_card = fetch_schema_card_for_schema(session, selected_db, selected_schema) if (selected_db and selected_schema) else ""
+            # Build schema card for selected database + schemas
+            schema_cards = []
+            for schema in selected_schemas:
+                card = fetch_schema_card_for_schema(session, selected_db, schema)
+                if card:
+                    schema_cards.append(card)
+            schema_card = "\n".join(schema_cards)
             system = "\n".join(FEW_SHOTS)
             ok, generated_sql, preview_rows, errs = try_generate_and_preview(
                 session=session,
