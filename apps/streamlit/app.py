@@ -581,7 +581,7 @@ create or replace table PIPELINE_CONFIG (
 
     # 2) Stored Procedure (sanitizes and validates snippet)
     session.sql(
-        """
+        '''
 create or replace procedure RUN_PIPELINE_FACTORY()
   returns string
   language python
@@ -701,7 +701,7 @@ as
 
     return f'Created/updated {created} dynamic table(s): ' + ', '.join(messages)
 $$;
-        """
+        '''
     ).collect()
 
     # 3) Orchestrator Task (runs SP every minute)
