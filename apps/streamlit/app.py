@@ -579,174 +579,6 @@ create table if not exists PIPELINE_CONFIG (
     ).collect()
     return
 
-    # 2) Stored Procedure (sanitizes and validates snippet)
-    session.sql(
-        '''
-create or replace procedure RUN_PIPELINE_FACTORY()
-  returns string
-  language python
-  runtime_version = '3.11'
-  packages = ('snowflake-snowpark-python')
-  handler = 'run'
-  execute as owner
-as
-$$
-from typing import List
-from snowflake.snowpark import Session
-
-PROHIBITED_TOKENS = (
-    ' use ', ' set ', ' create ', ' alter ', ' drop ', ' grant ', ' revoke ', ' call ',
-    ' copy ', ' insert ', ' update ', ' delete ', ' merge ', ' truncate '
-)
-ALLOWED_CLAUSE_PREFIXES = (
-    'where', 'qualify', 'group by', 'having', 'order by', 'limit'
-)
-
-def quote_identifier(identifier: str) -> str:
-    parts = [p.strip() for p in (identifier or '').split('.')]
-    quoted_parts = []
-    for p in parts:
-        if not p:
-            continue
-        p_safe = p.replace('"', '""')
-        quoted_parts.append('"' + p_safe + '"')
-    return '.'.join(quoted_parts)
-
-def quote_literal(value: str) -> str:
-    v = '' if value is None else str(value)
-    return "'" + v.replace("'", "''") + "'"
-
-def sanitize_snippet(sql_text: str) -> str:
-    lines = []
-    for raw in (sql_text or '').splitlines():
-        l = raw.strip()
-        if not l:
-            continue
-        ll = l.lower()
-        if ll.startswith('use ') or ll.startswith('set '):
-            continue
-        if l.endswith(';'):
-            l = l[:-1]
-        lines.append(l)
-    return '\n'.join(lines).strip()
-
-def validate_snippet(sql_text: str) -> None:
-    s = (sql_text or '').strip()
-    s_lower = ' ' + s.lower() + ' '
-    if ';' in s_lower:
-        raise ValueError('Transformation SQL must be a single statement (no semicolons)')
-    for token in PROHIBITED_TOKENS:
-        if token in s_lower:
-            raise ValueError(f'Unsupported token: {token.strip()}')
-
-def build_select_sql(snippet: str, quoted_source_table: str) -> str:
-    s = sanitize_snippet(snippet)
-    if '{SOURCE_TABLE}' in s:
-        validate_snippet(s)
-        return s.replace('{SOURCE_TABLE}', quoted_source_table)
-    s_trim = s.lstrip()
-    if s_trim.lower().startswith('select') or s_trim.lower().startswith('with'):
-        validate_snippet(s)
-        return s
-    # Clause append mode
-    head = s_trim.lower()
-    if not any(head.startswith(p) for p in ALLOWED_CLAUSE_PREFIXES):
-        raise ValueError('Clause must start with WHERE/QUALIFY/GROUP BY/HAVING/ORDER BY/LIMIT')
-    return f'select * from {quoted_source_table} ' + s
-
-def run(session: Session) -> str:
-    rows: List = session.sql("""
-        select pipeline_id, source_table_name, transformation_sql_snippet,
-               target_dt_name, lag_minutes, warehouse
-        from PIPELINE_CONFIG
-        where status = 'PENDING'
-        order by pipeline_id
-    """).collect()
-
-    if not rows:
-        return 'No pending pipelines.'
-
-    created = 0
-    messages = []
-
-    for r in rows:
-        pipeline_id = r['PIPELINE_ID']
-        source_table_name = r['SOURCE_TABLE_NAME']
-        snippet = r['TRANSFORMATION_SQL_SNIPPET']
-        target_dt_name = r['TARGET_DT_NAME']
-        lag_minutes = int(r['LAG_MINUTES'])
-        warehouse = r['WAREHOUSE']
-
-        q_source = quote_identifier(source_table_name)
-        q_target = quote_identifier(target_dt_name)
-        q_wh = quote_identifier(warehouse)
-
-        select_sql = build_select_sql(snippet, q_source)
-
-        dt_sql = f"""
-create or replace dynamic table {q_target}
-warehouse = {q_wh}
-lag = '{lag_minutes} minutes'
-as
-{select_sql}
-"""
-        session.sql(dt_sql).collect()
-
-        session.sql(
-            f"update PIPELINE_CONFIG set status = 'ACTIVE' where pipeline_id = {quote_literal(pipeline_id)}"
-        ).collect()
-
-        created += 1
-        messages.append(f"{pipeline_id} -> {target_dt_name}")
-
-    return f'Created/updated {created} dynamic table(s): ' + ', '.join(messages)
-$$;
-        '''
-    ).collect()
-
-    # 3) Orchestrator Task (runs SP every minute)
-    session.sql(
-        f"""
-create or replace task PIPELINE_ORCHESTRATOR_TASK
-warehouse = {wh}
-schedule = 'USING CRON * * * * * UTC'
-as
-call RUN_PIPELINE_FACTORY();
-        """
-    ).collect()
-    session.sql("alter task PIPELINE_ORCHESTRATOR_TASK resume").collect()
-
-    # 4) Health Monitor DT
-    session.sql(
-        """
-create or replace dynamic table PIPELINE_HEALTH_MONITOR_DT
-warehouse = PIPELINE_WH
-lag = '5 minutes'
-as
-with active as (
-  select target_dt_name
-  from PIPELINE_CONFIG
-  where status = 'ACTIVE'
-),
-latest_history as (
-  select database_name, schema_name, name as dt_name, state as last_refresh_state,
-         start_time as last_refresh_start, end_time as last_refresh_end,
-         rows_inserted, rows_updated, rows_deleted, staleness_seconds,
-         row_number() over (partition by database_name, schema_name, name
-                            order by coalesce(end_time, start_time) desc) as rn
-  from snowflake.account_usage.dynamic_table_refresh_history
-)
-select lh.database_name, lh.schema_name, lh.dt_name, lh.last_refresh_state,
-       lh.last_refresh_start, lh.last_refresh_end,
-       lh.rows_inserted, lh.rows_updated, lh.rows_deleted,
-       lh.staleness_seconds as data_freshness_seconds
-from latest_history lh
-join active a
-  on upper(lh.dt_name) = upper(split_part(a.target_dt_name, '.', -1))
-where lh.rn = 1;
-        """
-    ).collect()
-
 
 # ================================
 # 🤖 Cortex COMPLETE generator (guardrailed)
@@ -768,6 +600,26 @@ def extract_sql_from_text(text: str) -> str:
     if t.endswith(';'):
         t = t[:-1]
     return t.strip()
+
+def fetch_schema_card_for_schema(session: Session, database: str, schema: str) -> str:
+    """Fetch basic table/column info for a schema to ground the model"""
+    try:
+        session.sql(f"USE DATABASE {database}").collect()
+        session.sql(f"USE SCHEMA {schema}").collect()
+        tables = session.sql("SHOW TABLES").collect()
+        
+        card_lines = [f"Schema: {database}.{schema}"]
+        for table in tables[:5]:  # Limit to 5 tables
+            table_name = table['name']
+            try:
+                cols = session.sql(f"DESCRIBE TABLE {table_name}").collect()
+                col_info = ", ".join([f"{c['name']}({c['type']})" for c in cols[:10]])
+                card_lines.append(f"  {table_name}: {col_info}")
+            except:
+                card_lines.append(f"  {table_name}: (columns unknown)")
+        return "\n".join(card_lines)
+    except:
+        return f"Schema: {database}.{schema} (access error)"
 
 def generate_sql_with_complete(session: Session, database: str, schemas: list[str], user_prompt: str) -> tuple[bool, str, str]:
     # Build schema card from selected schemas to ground the model
@@ -899,23 +751,23 @@ def main():
         
         # Chat input (Cortex COMPLETE)
         user_input = st.chat_input("Describe the data/insight you need…")
-            
-            if user_input:
-                st.session_state.messages.append({"role": "user", "content": user_input})
-                with st.spinner("🧠 Generating SQL..."):
-                    ok, sql_text, err = generate_sql_with_complete(
-                        session=session,
-                        database=st.session_state.get('database') or '',
-                        schemas=[st.session_state.get('schema')] if st.session_state.get('schema') else [],
-                        user_prompt=user_input,
-                    )
-                if not ok:
-                    st.error(err)
-                else:
-                    st.session_state['last_sql'] = sql_text
-                    st.session_state['pending_sql'] = sql_text
-                    st.session_state.messages.append({"role": "assistant", "content": sql_text})
-                st.rerun()
+        
+        if user_input:
+            st.session_state.messages.append({"role": "user", "content": user_input})
+            with st.spinner("🧠 Generating SQL..."):
+                ok, sql_text, err = generate_sql_with_complete(
+                    session=session,
+                    database=st.session_state.get('database') or '',
+                    schemas=[st.session_state.get('schema')] if st.session_state.get('schema') else [],
+                    user_prompt=user_input,
+                )
+            if not ok:
+                st.error(err)
+            else:
+                st.session_state['last_sql'] = sql_text
+                st.session_state['pending_sql'] = sql_text
+                st.session_state.messages.append({"role": "assistant", "content": sql_text})
+            st.rerun()
     
     with col2:
         st.header("📊 Live Results")
