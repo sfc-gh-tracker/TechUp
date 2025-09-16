@@ -561,11 +561,10 @@ def create_pipeline_with_overrides(session: Session, sql: str, pipeline_name: st
 # ================================
 
 def install_pipeline_factory(session: Session, warehouse: str) -> None:
-    wh = warehouse or DEFAULT_WAREHOUSE
-    # 1) PIPELINE_CONFIG table
+    # Create PIPELINE_CONFIG only; DTs are created directly on approval.
     session.sql(
         """
-create or replace table PIPELINE_CONFIG (
+create table if not exists PIPELINE_CONFIG (
   pipeline_id                varchar          not null,
   source_table_name          varchar          not null,
   transformation_sql_snippet string           not null,
@@ -578,6 +577,7 @@ create or replace table PIPELINE_CONFIG (
 );
         """
     ).collect()
+    return
 
     # 2) Stored Procedure (sanitizes and validates snippet)
     session.sql(
@@ -932,20 +932,36 @@ def main():
             pipeline_name = st.text_input("Pipeline ID", value=f"approved_{datetime.now().strftime('%Y%m%d_%H%M')}" )
             lag_minutes = st.number_input("Lag minutes", min_value=1, max_value=1440, value=10)
             warehouse = st.text_input("Warehouse", value=DEFAULT_WAREHOUSE)
-            approve_cols = st.columns(2)
+            approve_cols = st.columns(3)
             with approve_cols[0]:
-                if st.button("Approve & Insert Pipeline", type="primary"):
+                if st.button("Approve & Create DT", type="primary"):
                     new_sql = st.session_state.get('pending_sql_editor')
                     ok2, err2 = validate_pipeline_sql(new_sql)
                     if not ok2:
                         st.error(f"Validation failed: {err2}")
                     else:
-                        if create_pipeline_with_overrides(session, new_sql, pipeline_name, target_dt_name, int(lag_minutes), warehouse):
-                            st.success("Pipeline inserted as PENDING. Orchestrator will create the DT.")
+                        # Directly create the Dynamic Table (no SP/Task)
+                        dt_sql = f"""
+create or replace dynamic table {target_dt_name}
+warehouse = {warehouse}
+lag = '{int(lag_minutes)} minutes'
+as
+{new_sql}
+"""
+                        try:
+                            session.sql(dt_sql).collect()
+                            st.success("Dynamic Table created.")
                             st.session_state.pop('pending_sql', None)
+                            st.session_state['last_sql'] = new_sql
+                        except Exception as e:
+                            st.error(f"DT creation failed: {e}")
             with approve_cols[1]:
                 if st.button("Reject Proposal"):
                     st.session_state.pop('pending_sql', None)
+            with approve_cols[2]:
+                if st.button("(Optional) Insert to PIPELINE_CONFIG"):
+                    if create_pipeline_with_overrides(session, new_sql, pipeline_name, target_dt_name, int(lag_minutes), warehouse):
+                        st.success("Inserted into PIPELINE_CONFIG (PENDING)")
 
         # Execute SQL and show results
         if 'last_sql' in st.session_state:
