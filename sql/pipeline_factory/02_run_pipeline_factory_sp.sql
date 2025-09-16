@@ -28,6 +28,21 @@ def validate_snippet(sql_text: str) -> None:
         if token in s_lower:
             raise ValueError(f"Unsupported token in transformation SQL: {token.strip()}")
 
+def sanitize_snippet(sql_text: str) -> str:
+    # Remove any lines starting with USE/SET and strip semicolons
+    lines = []
+    for raw in (sql_text or '').splitlines():
+        l = raw.strip()
+        if not l:
+            continue
+        l_lower = l.lower()
+        if l_lower.startswith('use ') or l_lower.startswith('set '):
+            continue
+        if l.endswith(';'):
+            l = l[:-1]
+        lines.append(l)
+    return '\n'.join(lines).strip()
+
 def quote_identifier(identifier: str) -> str:
     parts = [p.strip() for p in identifier.split('.')]
     quoted_parts = []
@@ -42,7 +57,7 @@ def quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 def build_select_sql(snippet: str, quoted_source_table: str) -> str:
-    s = (snippet or "").strip()
+    s = sanitize_snippet(snippet)
     has_placeholder = "{SOURCE_TABLE}" in s
     if has_placeholder:
         validate_snippet(s)
