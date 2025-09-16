@@ -505,6 +505,56 @@ def create_pipeline_from_analysis(session: Session, sql: str, pipeline_name: str
         st.error(f"Failed to create pipeline: {str(e)}")
         return False
 
+
+# ------------------------------
+# Steward approval helpers
+# ------------------------------
+PROHIBITED_TOKENS = (
+    ' use ', ' set ', ' create ', ' alter ', ' drop ', ' grant ', ' revoke ', ' call ',
+    ' copy ', ' insert ', ' update ', ' delete ', ' merge ', ' truncate '
+)
+
+def validate_pipeline_sql(sql_text: str) -> Tuple[bool, str]:
+    s = (sql_text or '').strip()
+    if not s:
+        return False, 'SQL is empty'
+    s_lower = ' ' + s.lower() + ' '
+    if ';' in s_lower:
+        return False, 'Only a single statement without semicolons is allowed'
+    if not (s.lstrip().lower().startswith('select') or s.lstrip().lower().startswith('with')):
+        return False, 'SQL must start with SELECT or WITH'
+    for token in PROHIBITED_TOKENS:
+        if token in s_lower:
+            return False, f"Unsupported token found: {token.strip()}"
+    return True, ''
+
+def create_pipeline_with_overrides(session: Session, sql: str, pipeline_name: str, target_table: str, lag_minutes: int, warehouse: str) -> bool:
+    try:
+        insert_sql = f"""
+        INSERT INTO PIPELINE_CONFIG (
+            pipeline_id, 
+            source_table_name, 
+            transformation_sql_snippet, 
+            target_dt_name, 
+            lag_minutes, 
+            warehouse, 
+            status
+        ) VALUES (
+            '{pipeline_name}',
+            'ANALYTICS_SOURCE',
+            $${sql}$$,
+            '{target_table}',
+            {lag_minutes},
+            '{warehouse or DEFAULT_WAREHOUSE}',
+            'PENDING'
+        )
+        """
+        session.sql(insert_sql).collect()
+        return True
+    except Exception as e:
+        st.error(f"Failed to insert pipeline config: {e}")
+        return False
+
 # ================================
 # 🎭 MAIN APPLICATION
 # ================================
@@ -620,9 +670,10 @@ def main():
                     assistant_message = response['message']['content'][0]['text']
                     st.session_state.messages.append({"role": "assistant", "content": assistant_message})
                     
-                    # Store SQL for execution
+                    # Store SQL for execution and approval
                     if 'sql' in response:
                         st.session_state['last_sql'] = response['sql']
+                        st.session_state['pending_sql'] = response['sql']
                     
                     # Store suggestions
                     if len(response['message']['content']) > 1:
@@ -635,6 +686,33 @@ def main():
     with col2:
         st.header("📊 Live Results")
         
+        # Steward approval / overrides
+        st.subheader("✅ Steward Approval")
+        pending_sql = st.session_state.get('pending_sql')
+        if pending_sql:
+            ok, err = validate_pipeline_sql(pending_sql)
+            if not ok:
+                st.error(f"Validation failed: {err}")
+            st.text_area("Proposed SQL (edit before approval)", value=pending_sql, key="pending_sql_editor", height=180)
+            target_dt_name = st.text_input("Target Dynamic Table (DB.SCHEMA.NAME)", value=st.session_state.get('schema', 'SCHEMA') + ".APPROVED_DT")
+            pipeline_name = st.text_input("Pipeline ID", value=f"approved_{datetime.now().strftime('%Y%m%d_%H%M')}" )
+            lag_minutes = st.number_input("Lag minutes", min_value=1, max_value=1440, value=10)
+            warehouse = st.text_input("Warehouse", value=DEFAULT_WAREHOUSE)
+            approve_cols = st.columns(2)
+            with approve_cols[0]:
+                if st.button("Approve & Insert Pipeline", type="primary"):
+                    new_sql = st.session_state.get('pending_sql_editor')
+                    ok2, err2 = validate_pipeline_sql(new_sql)
+                    if not ok2:
+                        st.error(f"Validation failed: {err2}")
+                    else:
+                        if create_pipeline_with_overrides(session, new_sql, pipeline_name, target_dt_name, int(lag_minutes), warehouse):
+                            st.success("Pipeline inserted as PENDING. Orchestrator will create the DT.")
+                            st.session_state.pop('pending_sql', None)
+            with approve_cols[1]:
+                if st.button("Reject Proposal"):
+                    st.session_state.pop('pending_sql', None)
+
         # Execute SQL and show results
         if 'last_sql' in st.session_state:
             try:
@@ -679,7 +757,7 @@ def main():
                 else:
                     st.info("No data returned from query")
                     
-        except Exception as e:
+            except Exception as e:
                 st.error(f"Query execution failed: {str(e)}")
         
         # Suggestions
