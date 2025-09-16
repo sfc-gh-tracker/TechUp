@@ -653,28 +653,45 @@ def main():
     
     # Sidebar Configuration
     with st.sidebar:
-        st.header("🎯 Configuration")
+        st.header("🎯 Data Source Configuration")
         
-        # Database selection
+        # Source database selection
         databases = get_databases(session)
         if databases:
-            selected_db = st.selectbox("📊 Database", databases)
-            st.session_state['database'] = selected_db
+            source_db = st.selectbox("📊 Source Database", databases, key="source_db")
+            st.session_state['source_database'] = source_db
             
-            # Schema selection (multiselect)
-            schemas = get_schemas(session, selected_db)
-            if schemas:
-                selected_schemas = st.multiselect("🗂️ Schemas", schemas, default=schemas[:1] if schemas else [])
-                st.session_state['schemas'] = selected_schemas
+            # Source schema selection (multiselect)
+            source_schemas = get_schemas(session, source_db)
+            if source_schemas:
+                selected_schemas = st.multiselect("🗂️ Source Schemas", source_schemas, default=source_schemas[:1] if source_schemas else [], key="source_schemas")
+                st.session_state['source_schemas'] = selected_schemas
                 
                 if selected_schemas:
-                    st.success(f"✅ Ready to generate SQL for {selected_db} with {len(selected_schemas)} schema(s)")
+                    st.success(f"✅ Ready to generate SQL from {source_db} with {len(selected_schemas)} schema(s)")
                 else:
-                    st.warning("Please select at least one schema")
+                    st.warning("Please select at least one source schema")
             else:
-                st.warning("No schemas found in selected database")
+                st.warning("No schemas found in source database")
         else:
             st.error("No databases accessible")
+        
+        st.header("🎯 Dynamic Table Target")
+        
+        # Target database selection
+        if databases:
+            target_db = st.selectbox("📊 Target Database", databases, key="target_db")
+            st.session_state['target_database'] = target_db
+            
+            # Target schema selection
+            target_schemas = get_schemas(session, target_db)
+            if target_schemas:
+                target_schema = st.selectbox("🗂️ Target Schema", target_schemas, key="target_schema")
+                st.session_state['target_schema'] = target_schema
+                
+                st.info(f"Dynamic Tables will be created in: **{target_db}.{target_schema}**")
+            else:
+                st.warning("No schemas found in target database")
         
         # Pipeline configuration
         st.header("⚙️ Pipeline Settings")
@@ -688,10 +705,11 @@ def main():
                 st.success("Sample data created! Refresh and try again.")
         
         # Show current context
-        if st.session_state.get('database') and st.session_state.get('schemas'):
+        if st.session_state.get('source_database') and st.session_state.get('source_schemas'):
             with st.expander("📋 Current Context"):
-                st.write(f"**Database:** {st.session_state['database']}")
-                st.write(f"**Schemas:** {', '.join(st.session_state['schemas'])}")
+                st.write(f"**Source:** {st.session_state['source_database']} → {', '.join(st.session_state['source_schemas'])}")
+                if st.session_state.get('target_database') and st.session_state.get('target_schema'):
+                    st.write(f"**Target:** {st.session_state['target_database']}.{st.session_state['target_schema']}")
     
     # Main chat interface
     col1, col2 = st.columns([2, 1])
@@ -729,8 +747,8 @@ def main():
             with st.spinner("🧠 Generating SQL..."):
                 ok, sql_text, err = generate_sql_with_complete(
                     session=session,
-                    database=st.session_state.get('database') or '',
-                    schemas=st.session_state.get('schemas') or [],
+                    database=st.session_state.get('source_database') or '',
+                    schemas=st.session_state.get('source_schemas') or [],
                     user_prompt=user_input,
                 )
             if not ok:
@@ -752,8 +770,11 @@ def main():
             if not ok:
                 st.error(f"Validation failed: {err}")
             st.text_area("Proposed SQL (edit before approval)", value=pending_sql, key="pending_sql_editor", height=180)
-            default_schema = st.session_state.get('schemas', ['SCHEMA'])[0] if st.session_state.get('schemas') else 'SCHEMA'
-            target_dt_name = st.text_input("Target Dynamic Table (DB.SCHEMA.NAME)", value=f"{st.session_state.get('database', 'DB')}.{default_schema}.APPROVED_DT")
+            
+            # Use target database/schema from sidebar
+            target_db = st.session_state.get('target_database', 'DB')
+            target_schema = st.session_state.get('target_schema', 'SCHEMA')
+            target_dt_name = st.text_input("Target Dynamic Table", value=f"{target_db}.{target_schema}.APPROVED_DT")
             pipeline_name = st.text_input("Pipeline ID", value=f"approved_{datetime.now().strftime('%Y%m%d_%H%M')}" )
             lag_minutes = st.number_input("Lag minutes", min_value=1, max_value=1440, value=10)
             warehouse = st.text_input("Warehouse", value=DEFAULT_WAREHOUSE)
@@ -823,8 +844,9 @@ as
                     with col_a:
                         pipeline_name = st.text_input("Pipeline Name", value=f"analysis_{datetime.now().strftime('%Y%m%d_%H%M')}")
                     with col_b:
-                        default_schema = st.session_state.get('schemas', ['SCHEMA'])[0] if st.session_state.get('schemas') else 'SCHEMA'
-                        target_table = st.text_input("Target Table", value=f"{st.session_state.get('database', 'DB')}.{default_schema}.{pipeline_name.upper()}_DT")
+                        target_db = st.session_state.get('target_database', 'DB')
+                        target_schema = st.session_state.get('target_schema', 'SCHEMA')
+                        target_table = st.text_input("Target Table", value=f"{target_db}.{target_schema}.{pipeline_name.upper()}_DT")
                     
                     if st.button("🎯 Create Dynamic Table Pipeline", type="primary"):
                         if create_pipeline_from_analysis(session, st.session_state['last_sql'], pipeline_name, target_table):
