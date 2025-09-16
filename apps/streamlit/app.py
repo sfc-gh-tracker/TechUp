@@ -105,12 +105,43 @@ def get_schemas(session: Session, database: str) -> List[str]:
 def get_tables(session: Session, database: str, schema: str) -> List[Dict]:
     """Get tables with metadata for semantic model"""
     try:
+        # Set context
         session.sql(f"USE DATABASE {database}").collect()
         session.sql(f"USE SCHEMA {schema}").collect()
         
         tables_info = []
-        tables = session.sql("SHOW TABLES").collect()
         
+        # Try different approaches to find tables
+        table_queries = [
+            "SHOW TABLES",
+            f"SHOW TABLES IN SCHEMA {database}.{schema}",
+            f"SELECT table_name FROM {database}.information_schema.tables WHERE table_schema = '{schema}' AND table_type = 'BASE TABLE'"
+        ]
+        
+        tables = []
+        for query in table_queries:
+            try:
+                result = session.sql(query).collect()
+                if result:
+                    if 'name' in result[0].as_dict():
+                        tables = [{'name': row['name']} for row in result]
+                    elif 'TABLE_NAME' in result[0].as_dict():
+                        tables = [{'name': row['TABLE_NAME']} for row in result]
+                    break
+            except Exception as e:
+                st.write(f"Debug: Query failed: {query} - {e}")
+                continue
+        
+        if not tables:
+            st.warning(f"No tables found in {database}.{schema}. This could be due to:")
+            st.write("- Schema is empty")
+            st.write("- Insufficient permissions")
+            st.write("- Schema contains only views/external tables")
+            return []
+        
+        st.info(f"Found {len(tables)} table(s) in {database}.{schema}")
+        
+        # Get table metadata
         for table in tables[:10]:  # Limit to 10 tables for demo
             table_name = table['name']
             try:
@@ -120,12 +151,80 @@ def get_tables(session: Session, database: str, schema: str) -> List[Dict]:
                     'columns': [{'name': col['name'], 'type': col['type']} for col in columns[:20]]
                 }
                 tables_info.append(table_info)
-            except:
+                st.write(f"✅ Analyzed table: {table_name} ({len(table_info['columns'])} columns)")
+            except Exception as e:
+                st.write(f"⚠️ Could not analyze table {table_name}: {e}")
+                # Add table anyway with minimal info
+                tables_info.append({
+                    'name': table_name,
+                    'columns': [{'name': 'id', 'type': 'NUMBER'}]  # Fallback
+                })
                 continue
                 
         return tables_info
-    except:
+        
+    except Exception as e:
+        st.error(f"Error accessing {database}.{schema}: {e}")
+        st.write("**Troubleshooting tips:**")
+        st.write("- Verify the database and schema exist")
+        st.write("- Check you have USAGE privilege on the database and schema")
+        st.write("- Ensure you have SELECT privilege on tables")
+        st.write("- Try a different schema with known data")
         return []
+
+def create_sample_data(session: Session):
+    """Create sample tables for demo purposes"""
+    try:
+        # Create a demo schema
+        session.sql("CREATE SCHEMA IF NOT EXISTS DEMO").collect()
+        session.sql("USE SCHEMA DEMO").collect()
+        
+        # Create sample customers table
+        session.sql("""
+        CREATE OR REPLACE TABLE CUSTOMERS AS
+        SELECT 
+            ROW_NUMBER() OVER (ORDER BY RANDOM()) as customer_id,
+            'Customer_' || customer_id as customer_name,
+            CASE WHEN RANDOM() < 0.3 THEN 'Premium' 
+                 WHEN RANDOM() < 0.7 THEN 'Standard' 
+                 ELSE 'Basic' END as customer_type,
+            DATEADD(day, -RANDOM()*365, CURRENT_DATE) as created_date,
+            ROUND(RANDOM() * 10000, 2) as lifetime_value
+        FROM TABLE(GENERATOR(ROWCOUNT => 100))
+        """).collect()
+        
+        # Create sample orders table
+        session.sql("""
+        CREATE OR REPLACE TABLE ORDERS AS
+        SELECT 
+            ROW_NUMBER() OVER (ORDER BY RANDOM()) as order_id,
+            MOD(ROW_NUMBER() OVER (ORDER BY RANDOM()), 100) + 1 as customer_id,
+            DATEADD(day, -RANDOM()*180, CURRENT_DATE) as order_date,
+            ROUND(RANDOM() * 1000 + 50, 2) as order_amount,
+            CASE WHEN RANDOM() < 0.8 THEN 'Completed' 
+                 WHEN RANDOM() < 0.95 THEN 'Pending' 
+                 ELSE 'Cancelled' END as status
+        FROM TABLE(GENERATOR(ROWCOUNT => 500))
+        """).collect()
+        
+        # Create sample products table  
+        session.sql("""
+        CREATE OR REPLACE TABLE PRODUCTS AS
+        SELECT 
+            ROW_NUMBER() OVER (ORDER BY RANDOM()) as product_id,
+            'Product_' || product_id as product_name,
+            CASE WHEN RANDOM() < 0.4 THEN 'Electronics' 
+                 WHEN RANDOM() < 0.7 THEN 'Clothing' 
+                 ELSE 'Home & Garden' END as category,
+            ROUND(RANDOM() * 500 + 10, 2) as price,
+            ROUND(RANDOM() * 1000) as stock_quantity
+        FROM TABLE(GENERATOR(ROWCOUNT => 50))
+        """).collect()
+        
+        st.info("✅ Created sample tables: CUSTOMERS, ORDERS, PRODUCTS in DEMO schema")
+        
+    except Exception as e:
+        st.error(f"Failed to create sample data: {e}")
 
 # ================================
 # 🎯 SEMANTIC MODEL GENERATION
@@ -457,6 +556,13 @@ def main():
         st.header("⚙️ Pipeline Settings")
         pipeline_warehouse = st.text_input("Warehouse", value=DEFAULT_WAREHOUSE)
         
+        # Demo data option
+        st.header("🎯 Demo Mode")
+        if st.button("🚀 Create Sample Data", help="Creates sample tables for testing"):
+            with st.spinner("Creating sample data..."):
+                create_sample_data(session)
+                st.success("Sample data created! Refresh and try again.")
+        
         # Show semantic model
         if 'semantic_model' in st.session_state:
             with st.expander("📋 Semantic Model"):
@@ -573,7 +679,7 @@ def main():
                 else:
                     st.info("No data returned from query")
                     
-            except Exception as e:
+        except Exception as e:
                 st.error(f"Query execution failed: {str(e)}")
         
         # Suggestions
