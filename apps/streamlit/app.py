@@ -581,7 +581,7 @@ create table if not exists PIPELINE_CONFIG (
 
 
 # ================================
-# 🤖 Cortex COMPLETE generator (guardrailed)
+# 🤖 CORTEX COMPLETE SQL GENERATOR
 # ================================
 
 def extract_sql_from_text(text: str) -> str:
