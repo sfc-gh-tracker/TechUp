@@ -11,6 +11,22 @@ $$
 from typing import List
 from snowflake.snowpark import Session
 
+PROHIBITED_TOKENS = (
+    ' use ', ' create ', ' alter ', ' drop ', ' grant ', ' revoke ', ' call ',
+    ' copy ', ' insert ', ' update ', ' delete ', ' merge ', ' truncate '
+)
+
+def ensure_safe_select(sql_text: str) -> None:
+    s = (' ' + (sql_text or '').strip().lower() + ' ')
+    if ';' in s:
+        raise ValueError("Transformation SQL must be a single statement without semicolons")
+    if not (s.lstrip().startswith('select') or s.lstrip().startswith('with')):
+        # allowed: clause appended later (handled by builder); skip safety here
+        return
+    for token in PROHIBITED_TOKENS:
+        if token in s:
+            raise ValueError(f"Unsupported token in transformation SQL: {token.strip()}")
+
 def quote_identifier(identifier: str) -> str:
     parts = [p.strip() for p in identifier.split('.')]
     quoted_parts = []
@@ -28,8 +44,10 @@ def build_select_sql(snippet: str, quoted_source_table: str) -> str:
     s = (snippet or "").strip()
     has_placeholder = "{SOURCE_TABLE}" in s
     if has_placeholder:
+        ensure_safe_select(s)
         return s.replace("{SOURCE_TABLE}", quoted_source_table)
-    if s[:6].lower() == "select":
+    if s[:6].lower() == "select" or s[:4].lower() == 'with':
+        ensure_safe_select(s)
         return s
     # Treat as clause appended to select * from source
     return f"select * from {quoted_source_table} {s}"
