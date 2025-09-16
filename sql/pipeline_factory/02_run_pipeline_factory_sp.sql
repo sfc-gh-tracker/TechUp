@@ -13,18 +13,19 @@ from snowflake.snowpark import Session
 
 PROHIBITED_TOKENS = (
     ' use ', ' create ', ' alter ', ' drop ', ' grant ', ' revoke ', ' call ',
-    ' copy ', ' insert ', ' update ', ' delete ', ' merge ', ' truncate '
+    ' copy ', ' insert ', ' update ', ' delete ', ' merge ', ' truncate ', ' set '
+)
+ALLOWED_CLAUSE_PREFIXES = (
+    'where', 'qualify', 'group by', 'having', 'order by', 'limit'
 )
 
-def ensure_safe_select(sql_text: str) -> None:
-    s = (' ' + (sql_text or '').strip().lower() + ' ')
-    if ';' in s:
-        raise ValueError("Transformation SQL must be a single statement without semicolons")
-    if not (s.lstrip().startswith('select') or s.lstrip().startswith('with')):
-        # allowed: clause appended later (handled by builder); skip safety here
-        return
+def validate_snippet(sql_text: str) -> None:
+    s = (sql_text or '').strip()
+    s_lower = ' ' + s.lower() + ' '
+    if ';' in s_lower:
+        raise ValueError("Transformation SQL must be a single statement (no semicolons)")
     for token in PROHIBITED_TOKENS:
-        if token in s:
+        if token in s_lower:
             raise ValueError(f"Unsupported token in transformation SQL: {token.strip()}")
 
 def quote_identifier(identifier: str) -> str:
@@ -44,12 +45,17 @@ def build_select_sql(snippet: str, quoted_source_table: str) -> str:
     s = (snippet or "").strip()
     has_placeholder = "{SOURCE_TABLE}" in s
     if has_placeholder:
-        ensure_safe_select(s)
+        validate_snippet(s)
         return s.replace("{SOURCE_TABLE}", quoted_source_table)
-    if s[:6].lower() == "select" or s[:4].lower() == 'with':
-        ensure_safe_select(s)
+    s_lower = s[:6].lower()
+    if s_lower.startswith("select") or s[:4].lower() == 'with':
+        validate_snippet(s)
         return s
     # Treat as clause appended to select * from source
+    validate_snippet(s)
+    s_head = s.lower().lstrip()
+    if not any(s_head.startswith(p) for p in ALLOWED_CLAUSE_PREFIXES):
+        raise ValueError("Snippet must be a SELECT/CTE or a clause starting with WHERE/QUALIFY/GROUP BY/HAVING/ORDER BY/LIMIT")
     return f"select * from {quoted_source_table} {s}"
 
 def run(session: Session) -> str:
