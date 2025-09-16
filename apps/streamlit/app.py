@@ -747,6 +747,65 @@ where lh.rn = 1;
         """
     ).collect()
 
+
+# ================================
+# 🤖 Cortex COMPLETE generator (guardrailed)
+# ================================
+
+def extract_sql_from_text(text: str) -> str:
+    t = (text or '').strip()
+    # Strip code fences/backticks
+    if t.startswith('```'):
+        t = t.strip('`')
+    # Heuristic: find first SELECT/WITH
+    lower = t.lower()
+    idx = lower.find('select')
+    if idx == -1:
+        idx = lower.find('with')
+    if idx >= 0:
+        t = t[idx:]
+    # Single statement only
+    if t.endswith(';'):
+        t = t[:-1]
+    return t.strip()
+
+def generate_sql_with_complete(session: Session, database: str, schemas: list[str], user_prompt: str) -> tuple[bool, str, str]:
+    # Build schema card from selected schemas to ground the model
+    cards = []
+    try:
+        for sc in (schemas or []):
+            card = fetch_schema_card_for_schema(session, database, sc)
+            if card:
+                cards.append(card)
+    except Exception:
+        pass
+    schema_card = "\n".join(cards)
+
+    system_rules = (
+        "Return a single SELECT or WITH query only. No semicolons. "
+        "Do NOT use USE/SET or any DDL/DML (CREATE/ALTER/DROP/INSERT/UPDATE/DELETE/MERGE/TRUNCATE/CALL/GRANT/REVOKE/COPY). "
+        "Use fully qualified identifiers: DB.SCHEMA.TABLE."
+    )
+    full_prompt = f"""
+{system_rules}
+You may only reference objects from {database} and these schemas: {', '.join(schemas or [])}
+Available tables/columns (partial):
+{schema_card}
+
+User request: {user_prompt}
+"""
+    try:
+        res = session.sql(
+            f"select snowflake.cortex.complete('mistral-large', $$ {full_prompt} $$) as c"
+        ).collect()[0][0]
+        sql_text = extract_sql_from_text(res)
+        ok, err = validate_pipeline_sql(sql_text)
+        if not ok:
+            return False, '', f"Validation failed: {err}"
+        return True, sql_text, ''
+    except Exception as e:
+        return False, '', f"Model call failed: {e}"
+
 # ================================
 # 🎭 MAIN APPLICATION
 # ================================
@@ -838,42 +897,25 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
         
-        # Chat input
-        if 'semantic_model' in st.session_state:
-            user_input = st.chat_input("Ask me anything about your data...")
+        # Chat input (Cortex COMPLETE)
+        user_input = st.chat_input("Describe the data/insight you need…")
             
             if user_input:
-                # Add user message
                 st.session_state.messages.append({"role": "user", "content": user_input})
-                
-                # Get Cortex Analyst response
-                with st.spinner("🧠 Analyzing your request..."):
-                    response = call_cortex_analyst(
-                        session, 
-                        user_input, 
-                        st.session_state['semantic_model'],
-                        st.session_state.messages
+                with st.spinner("🧠 Generating SQL..."):
+                    ok, sql_text, err = generate_sql_with_complete(
+                        session=session,
+                        database=st.session_state.get('database') or '',
+                        schemas=[st.session_state.get('schema')] if st.session_state.get('schema') else [],
+                        user_prompt=user_input,
                     )
-                
-                if 'error' in response:
-                    st.error(response['error'])
+                if not ok:
+                    st.error(err)
                 else:
-                    # Extract response text
-                    assistant_message = response['message']['content'][0]['text']
-                    st.session_state.messages.append({"role": "assistant", "content": assistant_message})
-                    
-                    # Store SQL for execution and approval
-                    if 'sql' in response:
-                        st.session_state['last_sql'] = response['sql']
-                        st.session_state['pending_sql'] = response['sql']
-                    
-                    # Store suggestions
-                    if len(response['message']['content']) > 1:
-                        st.session_state['suggestions'] = response['message']['content'][1].get('suggestions', [])
-                
+                    st.session_state['last_sql'] = sql_text
+                    st.session_state['pending_sql'] = sql_text
+                    st.session_state.messages.append({"role": "assistant", "content": sql_text})
                 st.rerun()
-        else:
-            st.info("👈 Please generate a semantic model first to start the conversation!")
     
     with col2:
         st.header("📊 Live Results")
