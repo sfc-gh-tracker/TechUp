@@ -581,7 +581,7 @@ create or replace table PIPELINE_CONFIG (
 
     # 2) Stored Procedure (sanitizes and validates snippet)
     session.sql(
-        f"""
+        """
 create or replace procedure RUN_PIPELINE_FACTORY()
   returns string
   language python
