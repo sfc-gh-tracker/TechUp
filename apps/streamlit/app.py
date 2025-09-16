@@ -601,51 +601,28 @@ def extract_sql_from_text(text: str) -> str:
         t = t[:-1]
     return t.strip()
 
-def fetch_schema_card_for_schema(session: Session, database: str, schema: str) -> str:
-    """Fetch basic table/column info for a schema to ground the model"""
-    try:
-        session.sql(f"USE DATABASE {database}").collect()
-        session.sql(f"USE SCHEMA {schema}").collect()
-        tables = session.sql("SHOW TABLES").collect()
-        
-        card_lines = [f"Schema: {database}.{schema}"]
-        for table in tables[:5]:  # Limit to 5 tables
-            table_name = table['name']
-            try:
-                cols = session.sql(f"DESCRIBE TABLE {table_name}").collect()
-                col_info = ", ".join([f"{c['name']}({c['type']})" for c in cols[:10]])
-                card_lines.append(f"  {table_name}: {col_info}")
-            except:
-                card_lines.append(f"  {table_name}: (columns unknown)")
-        return "\n".join(card_lines)
-    except:
-        return f"Schema: {database}.{schema} (access error)"
-
 def generate_sql_with_complete(session: Session, database: str, schemas: list[str], user_prompt: str) -> tuple[bool, str, str]:
-    # Build schema card from selected schemas to ground the model
-    cards = []
-    try:
-        for sc in (schemas or []):
-            card = fetch_schema_card_for_schema(session, database, sc)
-            if card:
-                cards.append(card)
-    except Exception:
-        pass
-    schema_card = "\n".join(cards)
-
+    """Simple Cortex COMPLETE call without schema introspection"""
+    
     system_rules = (
         "Return a single SELECT or WITH query only. No semicolons. "
         "Do NOT use USE/SET or any DDL/DML (CREATE/ALTER/DROP/INSERT/UPDATE/DELETE/MERGE/TRUNCATE/CALL/GRANT/REVOKE/COPY). "
-        "Use fully qualified identifiers: DB.SCHEMA.TABLE."
+        "Use fully qualified identifiers: DB.SCHEMA.TABLE. "
+        "Make realistic queries that would return actual data."
     )
+    
+    schema_context = f"Database: {database}, Schemas: {', '.join(schemas or [])}" if schemas else f"Database: {database}"
+    
     full_prompt = f"""
 {system_rules}
-You may only reference objects from {database} and these schemas: {', '.join(schemas or [])}
-Available tables/columns (partial):
-{schema_card}
+
+Context: {schema_context}
 
 User request: {user_prompt}
+
+Generate a SQL query that would answer this request using tables from the specified database/schemas.
 """
+    
     try:
         res = session.sql(
             f"select snowflake.cortex.complete('mistral-large', $$ {full_prompt} $$) as c"
@@ -682,24 +659,18 @@ def main():
         databases = get_databases(session)
         if databases:
             selected_db = st.selectbox("📊 Database", databases)
+            st.session_state['database'] = selected_db
             
-            # Schema selection
+            # Schema selection (multiselect)
             schemas = get_schemas(session, selected_db)
             if schemas:
-                selected_schema = st.selectbox("🗂️ Schema", schemas)
+                selected_schemas = st.multiselect("🗂️ Schemas", schemas, default=schemas[:1] if schemas else [])
+                st.session_state['schemas'] = selected_schemas
                 
-                # Generate semantic model button
-                if st.button("🧠 Generate Semantic Model", type="primary"):
-                    with st.spinner("Analyzing your data structure..."):
-                        tables = get_tables(session, selected_db, selected_schema)
-                        if tables:
-                            semantic_model = generate_semantic_model(selected_db, selected_schema, tables)
-                            st.session_state['semantic_model'] = semantic_model
-                            st.session_state['database'] = selected_db
-                            st.session_state['schema'] = selected_schema
-                            st.success(f"✅ Semantic model created with {len(tables)} tables!")
-                        else:
-                            st.error("No tables found in selected schema")
+                if selected_schemas:
+                    st.success(f"✅ Ready to generate SQL for {selected_db} with {len(selected_schemas)} schema(s)")
+                else:
+                    st.warning("Please select at least one schema")
             else:
                 st.warning("No schemas found in selected database")
         else:
@@ -716,10 +687,11 @@ def main():
                 create_sample_data(session)
                 st.success("Sample data created! Refresh and try again.")
         
-        # Show semantic model
-        if 'semantic_model' in st.session_state:
-            with st.expander("📋 Semantic Model"):
-                st.code(st.session_state['semantic_model'], language='yaml')
+        # Show current context
+        if st.session_state.get('database') and st.session_state.get('schemas'):
+            with st.expander("📋 Current Context"):
+                st.write(f"**Database:** {st.session_state['database']}")
+                st.write(f"**Schemas:** {', '.join(st.session_state['schemas'])}")
     
     # Main chat interface
     col1, col2 = st.columns([2, 1])
@@ -758,7 +730,7 @@ def main():
                 ok, sql_text, err = generate_sql_with_complete(
                     session=session,
                     database=st.session_state.get('database') or '',
-                    schemas=[st.session_state.get('schema')] if st.session_state.get('schema') else [],
+                    schemas=st.session_state.get('schemas') or [],
                     user_prompt=user_input,
                 )
             if not ok:
@@ -780,7 +752,8 @@ def main():
             if not ok:
                 st.error(f"Validation failed: {err}")
             st.text_area("Proposed SQL (edit before approval)", value=pending_sql, key="pending_sql_editor", height=180)
-            target_dt_name = st.text_input("Target Dynamic Table (DB.SCHEMA.NAME)", value=st.session_state.get('schema', 'SCHEMA') + ".APPROVED_DT")
+            default_schema = st.session_state.get('schemas', ['SCHEMA'])[0] if st.session_state.get('schemas') else 'SCHEMA'
+            target_dt_name = st.text_input("Target Dynamic Table (DB.SCHEMA.NAME)", value=f"{st.session_state.get('database', 'DB')}.{default_schema}.APPROVED_DT")
             pipeline_name = st.text_input("Pipeline ID", value=f"approved_{datetime.now().strftime('%Y%m%d_%H%M')}" )
             lag_minutes = st.number_input("Lag minutes", min_value=1, max_value=1440, value=10)
             warehouse = st.text_input("Warehouse", value=DEFAULT_WAREHOUSE)
@@ -850,7 +823,8 @@ as
                     with col_a:
                         pipeline_name = st.text_input("Pipeline Name", value=f"analysis_{datetime.now().strftime('%Y%m%d_%H%M')}")
                     with col_b:
-                        target_table = st.text_input("Target Table", value=f"{st.session_state.get('database', 'DB')}.{st.session_state.get('schema', 'SCHEMA')}.{pipeline_name.upper()}_DT")
+                        default_schema = st.session_state.get('schemas', ['SCHEMA'])[0] if st.session_state.get('schemas') else 'SCHEMA'
+                        target_table = st.text_input("Target Table", value=f"{st.session_state.get('database', 'DB')}.{default_schema}.{pipeline_name.upper()}_DT")
                     
                     if st.button("🎯 Create Dynamic Table Pipeline", type="primary"):
                         if create_pipeline_from_analysis(session, st.session_state['last_sql'], pipeline_name, target_table):
