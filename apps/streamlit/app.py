@@ -285,19 +285,20 @@ create table if not exists PIPELINE_CONFIG (
 
 def extract_sql_from_text(text: str) -> str:
     t = (text or '').strip()
-    # Strip code fences/backticks
+    # Strip common code fences/backticks
     if t.startswith('```'):
         t = t.strip('`')
-    # Heuristic: find first SELECT/WITH
+    # Keep only content from first SELECT/WITH
     lower = t.lower()
-    idx = lower.find('select')
-    if idx == -1:
-        idx = lower.find('with')
-    if idx >= 0:
-        t = t[idx:]
-    # Single statement only
-    if t.endswith(';'):
-        t = t[:-1]
+    start_idx = lower.find('select')
+    if start_idx == -1:
+        start_idx = lower.find('with')
+    if start_idx >= 0:
+        t = t[start_idx:]
+    # Truncate at first semicolon if multiple statements returned
+    semi_idx = t.find(';')
+    if semi_idx != -1:
+        t = t[:semi_idx]
     return t.strip()
 
 def generate_sql_with_complete(session: Session, database: str, schemas: list[str], user_prompt: str, attempt: int = 1) -> tuple[bool, str, str]:
@@ -443,7 +444,12 @@ def main():
         
         # Chat input (Cortex COMPLETE) - compatible with older Streamlit
         st.subheader("💬 Ask for Data Analysis")
-        user_input = st.text_input("Describe the data/insight you need:", placeholder="e.g., Show me sales trends by month", key="user_query")
+        user_input = st.text_area(
+            "Describe the data/insight you need:",
+            placeholder="e.g., Show me sales trends by month; include last 12 months",
+            key="user_query",
+            height=120
+        )
         
         if st.button("🧠 Generate SQL", type="primary") and user_input:
             st.session_state.messages.append({"role": "user", "content": user_input})
@@ -501,104 +507,8 @@ def main():
                 st.write("- Check that your selected schemas contain the relevant data")
     
     with col2:
-        st.header("📊 Live Results")
-        
-        # Steward approval / overrides
-        st.subheader("✅ Steward Approval")
-        pending_sql = st.session_state.get('pending_sql')
-        if pending_sql:
-            ok, err = validate_pipeline_sql(pending_sql)
-            if not ok:
-                st.error(f"Validation failed: {err}")
-            st.text_area("Proposed SQL (edit before approval)", value=pending_sql, key="pending_sql_editor", height=180)
-            
-            # Use target database/schema from sidebar
-            target_db = st.session_state.get('target_db', 'DB')
-            target_schema = st.session_state.get('target_schema', 'SCHEMA')
-            target_dt_name = st.text_input("Target Dynamic Table", value=f"{target_db}.{target_schema}.APPROVED_DT")
-            pipeline_name = st.text_input("Pipeline ID", value=f"approved_{datetime.now().strftime('%Y%m%d_%H%M')}" )
-            lag_minutes = st.number_input("Lag minutes", min_value=1, max_value=1440, value=10)
-            warehouse = st.text_input("Warehouse", value=st.session_state.get('default_warehouse', DEFAULT_WAREHOUSE))
-            approve_cols = st.columns(3)
-            with approve_cols[0]:
-                if st.button("Approve & Create DT", type="primary"):
-                    new_sql = st.session_state.get('pending_sql_editor')
-                    ok2, err2 = validate_pipeline_sql(new_sql)
-                    if not ok2:
-                        st.error(f"Validation failed: {err2}")
-                    else:
-                        # Directly create the Dynamic Table (no SP/Task)
-                        dt_sql = f"""
-create or replace dynamic table {target_dt_name}
-warehouse = {warehouse}
-lag = '{int(lag_minutes)} minutes'
-as
-{new_sql}
-"""
-                        try:
-                            session.sql(dt_sql).collect()
-                            st.success("Dynamic Table created.")
-                            st.session_state.pop('pending_sql', None)
-                            st.session_state['last_sql'] = new_sql
-                        except Exception as e:
-                            st.error(f"DT creation failed: {e}")
-            with approve_cols[1]:
-                if st.button("Clear Proposal"):
-                    st.session_state.pop('pending_sql', None)
-                    st.info("Proposal cleared")
-            with approve_cols[2]:
-                if st.button("(Optional) Insert to PIPELINE_CONFIG"):
-                    if create_pipeline_with_overrides(session, new_sql, pipeline_name, target_dt_name, int(lag_minutes), warehouse):
-                        st.success("Inserted into PIPELINE_CONFIG (PENDING)")
-
-        # Execute SQL and show results
-        if 'last_sql' in st.session_state:
-            try:
-                with st.spinner("Executing analysis..."):
-                    results = session.sql(st.session_state['last_sql']).collect()
-                    df = pd.DataFrame(results)
-                    
-                if not df.empty:
-                    # Show metrics if numeric data
-                    numeric_cols = df.select_dtypes(include=['number']).columns
-                    if len(numeric_cols) > 0:
-                        st.subheader("📈 Key Metrics")
-                        metrics_cols = st.columns(min(len(numeric_cols), 3))
-                        for i, col in enumerate(numeric_cols[:3]):
-                            with metrics_cols[i]:
-                                st.metric(
-                                    label=col.replace('_', ' ').title(),
-                                    value=f"{df[col].sum():,.0f}" if df[col].dtype in ['int64', 'float64'] else df[col].iloc[0]
-                                )
-                    
-                    # Create visualization
-                    st.subheader("📊 Visualization")
-                    fig = create_visualization(df)
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Show raw data
-                    with st.expander("🔍 Raw Data"):
-                        st.dataframe(df, use_container_width=True)
-                    
-                    # Pipeline creation
-                    st.subheader("🚀 Create Pipeline")
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        pipeline_name = st.text_input("Pipeline Name", value=f"analysis_{datetime.now().strftime('%Y%m%d_%H%M')}")
-                    with col_b:
-                        target_db = st.session_state.get('target_db', 'DB')
-                        target_schema = st.session_state.get('target_schema', 'SCHEMA')
-                        target_table = st.text_input("Target Table", value=f"{target_db}.{target_schema}.{pipeline_name.upper()}_DT")
-                    
-                    if st.button("🎯 Create Dynamic Table Pipeline", type="primary"):
-                        if create_pipeline_from_analysis(session, st.session_state['last_sql'], pipeline_name, target_table):
-                            st.success("🎉 Pipeline created! It will be processed by the orchestrator.")
-                            st.balloons()
-                else:
-                    st.info("No data returned from query")
-                    
-            except Exception as e:
-                st.error(f"Query execution failed: {str(e)}")
+        st.header("ℹ️ Status & Tips")
+        st.write("Generated SQL and preview will appear on the left after a successful run.")
         
         # Suggestions
         if 'suggestions' in st.session_state:
