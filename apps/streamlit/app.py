@@ -646,6 +646,9 @@ def main():
                     except Exception as e:
                         err_msg = str(e)
                         st.warning(f"Attempt {attempt}: SQL failed to execute - {err_msg}")
+                        # Show the exact SQL we attempted to run
+                        st.subheader(f"Attempt {attempt} - Executed SQL")
+                        st.code(candidate_sql, language='sql')
                         # Provide structured error summary to model
                         last_sql = candidate_sql
                         last_error = (
