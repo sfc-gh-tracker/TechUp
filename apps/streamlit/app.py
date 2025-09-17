@@ -300,26 +300,40 @@ def extract_sql_from_text(text: str) -> str:
         t = t[:-1]
     return t.strip()
 
-def generate_sql_with_complete(session: Session, database: str, schemas: list[str], user_prompt: str) -> tuple[bool, str, str]:
-    """Simple Cortex COMPLETE call without schema introspection"""
+def generate_sql_with_complete(session: Session, database: str, schemas: list[str], user_prompt: str, attempt: int = 1) -> tuple[bool, str, str]:
+    """Enhanced Cortex COMPLETE call with retry-aware prompting"""
     
     system_rules = (
         "Return a single SELECT or WITH query only. No semicolons. "
         "Do NOT use USE/SET or any DDL/DML (CREATE/ALTER/DROP/INSERT/UPDATE/DELETE/MERGE/TRUNCATE/CALL/GRANT/REVOKE/COPY). "
-        "Use fully qualified identifiers: DB.SCHEMA.TABLE. "
-        "Make realistic queries that would return actual data."
+        "Use fully qualified identifiers: DATABASE.SCHEMA.TABLE. "
+        "Generate queries that will return actual data with realistic WHERE clauses and filters. "
+        "Avoid queries that might return empty results."
     )
     
     schema_context = f"Database: {database}, Schemas: {', '.join(schemas or [])}" if schemas else f"Database: {database}"
+    
+    # Add attempt-specific guidance
+    attempt_guidance = ""
+    if attempt > 1:
+        attempt_guidance = f"""
+This is attempt #{attempt}. Previous attempts may have failed due to:
+- Empty results (add broader WHERE conditions)
+- Non-existent tables (use common table names like CUSTOMERS, ORDERS, SALES, TRANSACTIONS)
+- Complex joins (try simpler single-table queries first)
+Please generate a different, simpler query that's more likely to return data.
+"""
     
     full_prompt = f"""
 {system_rules}
 
 Context: {schema_context}
 
+{attempt_guidance}
+
 User request: {user_prompt}
 
-Generate a SQL query that would answer this request using tables from the specified database/schemas.
+Generate a working SQL query that will return actual data. Use realistic filters and common table/column names.
 """
     
     try:
@@ -438,20 +452,58 @@ def main():
         
         if st.button("🧠 Generate SQL", type="primary") and user_input:
             st.session_state.messages.append({"role": "user", "content": user_input})
-            with st.spinner("🧠 Generating SQL..."):
-                ok, sql_text, err = generate_sql_with_complete(
-                    session=session,
-                    database=st.session_state.get('source_database') or '',
-                    schemas=st.session_state.get('source_schemas') or [],
-                    user_prompt=user_input,
-                )
-            if not ok:
-                st.error(err)
-            else:
-                st.session_state['last_sql'] = sql_text
-                st.session_state['pending_sql'] = sql_text
-                st.session_state.messages.append({"role": "assistant", "content": sql_text})
-                st.success("✅ SQL generated! Check the results panel →")
+            
+            max_attempts = 3
+            attempt = 0
+            success = False
+            
+            while attempt < max_attempts and not success:
+                attempt += 1
+                with st.spinner(f"🧠 Generating SQL (attempt {attempt}/{max_attempts})..."):
+                    ok, sql_text, err = generate_sql_with_complete(
+                        session=session,
+                        database=st.session_state.get('source_database') or '',
+                        schemas=st.session_state.get('source_schemas') or [],
+                        user_prompt=user_input,
+                        attempt=attempt
+                    )
+                
+                if not ok:
+                    st.warning(f"Attempt {attempt} failed validation: {err}")
+                    continue
+                
+                # Test the generated SQL
+                with st.spinner(f"🔍 Testing SQL (attempt {attempt}/{max_attempts})..."):
+                    try:
+                        test_results = session.sql(sql_text).collect()
+                        if len(test_results) == 0:
+                            st.warning(f"Attempt {attempt}: SQL executed but returned no rows")
+                            continue
+                        
+                        # Success! SQL works and returns data
+                        st.session_state['last_sql'] = sql_text
+                        st.session_state['pending_sql'] = sql_text
+                        st.session_state.messages.append({"role": "assistant", "content": sql_text})
+                        
+                        # Show preview of first 3 records
+                        preview_df = pd.DataFrame(test_results[:3])
+                        st.success(f"✅ SQL generated and tested successfully! Returns {len(test_results)} rows")
+                        st.subheader("📋 Preview (First 3 Records)")
+                        st.dataframe(preview_df, use_container_width=True)
+                        
+                        success = True
+                        
+                    except Exception as e:
+                        st.warning(f"Attempt {attempt}: SQL failed to execute - {str(e)}")
+                        continue
+            
+            if not success:
+                st.error(f"❌ Failed to generate working SQL after {max_attempts} attempts. Please try a different prompt or check your database/schema selections.")
+                st.info("💡 **Tips for better results:**")
+                st.write("- Be more specific about the data you want")
+                st.write("- Mention specific table names if you know them")
+                st.write("- Try simpler queries first")
+                st.write("- Check that your selected schemas contain the relevant data")
     
     with col2:
         st.header("📊 Live Results")
