@@ -739,10 +739,11 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
         
-        # Chat input (Cortex COMPLETE)
-        user_input = st.chat_input("Describe the data/insight you need…")
+        # Chat input (Cortex COMPLETE) - compatible with older Streamlit
+        st.subheader("💬 Ask for Data Analysis")
+        user_input = st.text_input("Describe the data/insight you need:", placeholder="e.g., Show me sales trends by month", key="user_query")
         
-        if user_input:
+        if st.button("🧠 Generate SQL", type="primary") and user_input:
             st.session_state.messages.append({"role": "user", "content": user_input})
             with st.spinner("🧠 Generating SQL..."):
                 ok, sql_text, err = generate_sql_with_complete(
@@ -757,7 +758,7 @@ def main():
                 st.session_state['last_sql'] = sql_text
                 st.session_state['pending_sql'] = sql_text
                 st.session_state.messages.append({"role": "assistant", "content": sql_text})
-            st.rerun()
+                st.success("✅ SQL generated! Check the results panel →")
     
     with col2:
         st.header("📊 Live Results")
@@ -802,8 +803,9 @@ as
                         except Exception as e:
                             st.error(f"DT creation failed: {e}")
             with approve_cols[1]:
-                if st.button("Reject Proposal"):
+                if st.button("Clear Proposal"):
                     st.session_state.pop('pending_sql', None)
+                    st.info("Proposal cleared")
             with approve_cols[2]:
                 if st.button("(Optional) Insert to PIPELINE_CONFIG"):
                     if create_pipeline_with_overrides(session, new_sql, pipeline_name, target_dt_name, int(lag_minutes), warehouse):
@@ -863,9 +865,9 @@ as
             st.subheader("💡 Suggested Questions")
             for suggestion in st.session_state['suggestions']:
                 if st.button(suggestion, key=f"sug_{hash(suggestion)}"):
-                    # Simulate clicking the suggestion
-                    st.session_state.messages.append({"role": "user", "content": suggestion})
-                    st.rerun()
+                    # Set the suggestion in the input field
+                    st.session_state['user_query'] = suggestion
+                    st.info(f"Suggestion added to input: {suggestion}")
 
 if __name__ == "__main__":
     main()
