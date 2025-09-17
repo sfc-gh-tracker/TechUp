@@ -321,6 +321,34 @@ def _simple_sql_auto_repair(sql_text: str) -> str:
         close_paren -= 1
     return s
 
+def _strip_narrative_lines(sql_text: str) -> str:
+    """Remove obvious non-SQL narrative lines the model may include inside code."""
+    if not sql_text:
+        return sql_text
+    allowed_starts = (
+        'with', 'select', 'from', 'where', 'group', 'having', 'order', 'limit', 'qualify',
+        'join', 'inner', 'left', 'right', 'full', 'cross', 'on', 'union', 'except',
+        'intersect', 'window', 'using', 'as', 'values', 'lateral', 'apply', 'pivot', 'unpivot'
+    )
+    out = []
+    for raw in sql_text.splitlines():
+        s = raw.strip()
+        if not s:
+            out.append(raw)
+            continue
+        if s.startswith('--') or s.startswith('/*'):
+            out.append(raw)
+            continue
+        first = s.split()[0].lower()
+        if s.startswith('(') or first in allowed_starts:
+            out.append(raw)
+            continue
+        # Drop narrative lines like "The following query ..."
+        if first.isalpha():
+            continue
+        out.append(raw)
+    return '\n'.join(out)
+
 def extract_sql_from_text(text: str) -> str:
     t = (text or '').strip()
     # Strip common code fences/backticks
@@ -414,6 +442,7 @@ def extract_sql_from_text(text: str) -> str:
 
     t = _truncate_top_level(t)
     t = _reduce_to_single_top_level_select(t)
+    t = _strip_narrative_lines(t)
     return _simple_sql_auto_repair(t.strip())
 
 def generate_sql_with_complete(
@@ -466,6 +495,7 @@ Context: {schema_context}
 User request: {user_prompt}
 
 Generate a working SQL query that will return actual data. Use realistic filters and common table/column names.
+Only output SQL code. Do not include narrative sentences.
 """
     
     try:
@@ -622,7 +652,7 @@ def main():
                 with st.spinner(f"🔍 Testing SQL (attempt {attempt}/{max_attempts})..."):
                     try:
                         # Last-mile heuristic repair before execution
-                        candidate_sql = _simple_sql_auto_repair(sql_text)
+                        candidate_sql = _simple_sql_auto_repair(_strip_narrative_lines(sql_text))
                         test_results = session.sql(candidate_sql).collect()
                         if len(test_results) == 0:
                             st.warning(f"Attempt {attempt}: SQL executed but returned no rows")
