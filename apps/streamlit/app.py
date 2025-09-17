@@ -372,13 +372,11 @@ def main():
         databases = get_databases(session)
         if databases:
             source_db = st.selectbox("📊 Source Database", databases, key="source_db")
-            st.session_state['source_database'] = source_db
             
             # Source schema selection (multiselect)
             source_schemas = get_schemas(session, source_db)
             if source_schemas:
                 selected_schemas = st.multiselect("🗂️ Source Schemas", source_schemas, default=source_schemas[:1] if source_schemas else [], key="source_schemas")
-                st.session_state['source_schemas'] = selected_schemas
                 
                 if selected_schemas:
                     st.success(f"✅ Ready to generate SQL from {source_db} with {len(selected_schemas)} schema(s)")
@@ -394,13 +392,11 @@ def main():
         # Target database selection
         if databases:
             target_db = st.selectbox("📊 Target Database", databases, key="target_db")
-            st.session_state['target_database'] = target_db
             
             # Target schema selection
             target_schemas = get_schemas(session, target_db)
             if target_schemas:
                 target_schema = st.selectbox("🗂️ Target Schema", target_schemas, key="target_schema")
-                st.session_state['target_schema'] = target_schema
                 
                 st.info(f"Dynamic Tables will be created in: **{target_db}.{target_schema}**")
             else:
@@ -408,15 +404,14 @@ def main():
         
         # Pipeline configuration
         st.header("⚙️ Pipeline Settings")
-        default_warehouse = st.text_input("Default Warehouse", value=DEFAULT_WAREHOUSE)
-        st.session_state['default_warehouse'] = default_warehouse
+        default_warehouse = st.text_input("Default Warehouse", value=DEFAULT_WAREHOUSE, key="default_warehouse")
         
         # Show current context
-        if st.session_state.get('source_database') and st.session_state.get('source_schemas'):
+        if st.session_state.get('source_db') and st.session_state.get('source_schemas'):
             with st.expander("📋 Current Context"):
-                st.write(f"**Source:** {st.session_state['source_database']} → {', '.join(st.session_state['source_schemas'])}")
-                if st.session_state.get('target_database') and st.session_state.get('target_schema'):
-                    st.write(f"**Target:** {st.session_state['target_database']}.{st.session_state['target_schema']}")
+                st.write(f"**Source:** {st.session_state['source_db']} → {', '.join(st.session_state['source_schemas'])}")
+                if st.session_state.get('target_db') and st.session_state.get('target_schema'):
+                    st.write(f"**Target:** {st.session_state['target_db']}.{st.session_state['target_schema']}")
     
     # Main chat interface
     col1, col2 = st.columns([2, 1])
@@ -462,7 +457,7 @@ def main():
                 with st.spinner(f"🧠 Generating SQL (attempt {attempt}/{max_attempts})..."):
                     ok, sql_text, err = generate_sql_with_complete(
                         session=session,
-                        database=st.session_state.get('source_database') or '',
+                        database=st.session_state.get('source_db') or '',
                         schemas=st.session_state.get('source_schemas') or [],
                         user_prompt=user_input,
                         attempt=attempt
@@ -518,7 +513,7 @@ def main():
             st.text_area("Proposed SQL (edit before approval)", value=pending_sql, key="pending_sql_editor", height=180)
             
             # Use target database/schema from sidebar
-            target_db = st.session_state.get('target_database', 'DB')
+            target_db = st.session_state.get('target_db', 'DB')
             target_schema = st.session_state.get('target_schema', 'SCHEMA')
             target_dt_name = st.text_input("Target Dynamic Table", value=f"{target_db}.{target_schema}.APPROVED_DT")
             pipeline_name = st.text_input("Pipeline ID", value=f"approved_{datetime.now().strftime('%Y%m%d_%H%M')}" )
@@ -591,7 +586,7 @@ as
                     with col_a:
                         pipeline_name = st.text_input("Pipeline Name", value=f"analysis_{datetime.now().strftime('%Y%m%d_%H%M')}")
                     with col_b:
-                        target_db = st.session_state.get('target_database', 'DB')
+                        target_db = st.session_state.get('target_db', 'DB')
                         target_schema = st.session_state.get('target_schema', 'SCHEMA')
                         target_table = st.text_input("Target Table", value=f"{target_db}.{target_schema}.{pipeline_name.upper()}_DT")
                     
