@@ -603,10 +603,19 @@ def main():
                         error_context=last_error,
                         previous_sql=last_sql
                     )
+
+                # Always show the generated SQL for this attempt (even if invalid)
+                shown_sql = _simple_sql_auto_repair(sql_text or '') if ok else (sql_text or '')
+                if shown_sql.strip():
+                    st.subheader(f"Attempt {attempt} - Generated SQL")
+                    st.code(shown_sql, language='sql')
+                    st.session_state['last_sql'] = shown_sql
+                    st.session_state['pending_sql'] = shown_sql
                 
                 if not ok:
                     st.warning(f"Attempt {attempt} failed validation: {err}")
                     last_error = err
+                    last_sql = shown_sql
                     continue
                 
                 # Test the generated SQL
@@ -652,6 +661,9 @@ def main():
                 st.write("- Mention specific table names if you know them")
                 st.write("- Try simpler queries first")
                 st.write("- Check that your selected schemas contain the relevant data")
+                if last_sql:
+                    st.subheader("Last Generated SQL")
+                    st.code(last_sql, language='sql')
     
     with col2:
         st.header("ℹ️ Status & Tips")
