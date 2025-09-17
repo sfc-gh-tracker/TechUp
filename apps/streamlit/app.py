@@ -287,7 +287,7 @@ def _simple_sql_auto_repair(sql_text: str) -> str:
     """Heuristically fix common LLM SQL formatting issues (dangling parens, code fences)."""
     if not sql_text:
         return sql_text
-    # Drop code-fence cruft and standalone ')' lines
+    # Drop code-fence cruft and stray closing paren lines
     filtered_lines = []
     for raw in sql_text.splitlines():
         s = raw.strip()
@@ -296,11 +296,23 @@ def _simple_sql_auto_repair(sql_text: str) -> str:
             continue
         if s in ('```', '```sql', 'sql'):
             continue
-        if s == ')':
-            # Likely a dangling closing paren from truncated CTE
+        if s == ')' or s.startswith('),') or s.startswith(');') or s.startswith(') '):
+            # Likely a dangling closing paren from truncated CTE or subquery
             continue
         filtered_lines.append(raw)
     s = "\n".join(filtered_lines).strip()
+    # Remove leading unmatched ')' characters at document start
+    while s and s.lstrip().startswith(')'):
+        # Drop first line if it starts with ')'
+        first_newline = s.find('\n')
+        if first_newline == -1:
+            s = s.lstrip(') ').lstrip()
+            break
+        first_line = s[:first_newline]
+        if first_line.lstrip().startswith(')'):
+            s = s[first_newline+1:]
+        else:
+            break
     # Trim unmatched trailing ')'
     open_paren = s.count('(')
     close_paren = s.count(')')
