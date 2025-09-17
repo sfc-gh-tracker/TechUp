@@ -349,6 +349,60 @@ def _strip_narrative_lines(sql_text: str) -> str:
         out.append(raw)
     return '\n'.join(out)
 
+# ================================
+# 📚 Known tables/columns context
+# ================================
+
+def _sql_literal(value: str) -> str:
+    v = '' if value is None else str(value)
+    return "'" + v.replace("'", "''") + "'"
+
+def build_known_tables_context(session: Session, database: str, schemas: list[str], max_tables: int = 40, max_columns: int = 10) -> str:
+    """Return a compact text card of existing tables/columns in selected schemas (no USE statements)."""
+    try:
+        if not database or not schemas:
+            return ''
+        schema_list = ','.join(_sql_literal(s) for s in schemas)
+        tables_q = f"""
+select table_schema, table_name
+from {database}.information_schema.tables
+where table_schema in ({schema_list})
+  and table_type in ('BASE TABLE','VIEW')
+order by table_schema, table_name
+limit {max_tables}
+"""
+        tables = session.sql(tables_q).collect()
+        if not tables:
+            return ''
+        # Build set for columns query
+        table_keys = [(t['TABLE_SCHEMA'], t['TABLE_NAME']) for t in tables]
+        # Construct IN lists
+        tn_list = ','.join(_sql_literal(tn) for _, tn in table_keys)
+        cols_q = f"""
+select table_schema, table_name, column_name, data_type, ordinal_position
+from {database}.information_schema.columns
+where table_schema in ({schema_list})
+  and table_name in ({tn_list})
+order by table_schema, table_name, ordinal_position
+"""
+        cols = session.sql(cols_q).collect()
+        cols_map: dict[tuple[str,str], list[tuple[str,str]]] = {}
+        for c in cols:
+            key = (c['TABLE_SCHEMA'], c['TABLE_NAME'])
+            lst = cols_map.setdefault(key, [])
+            if len(lst) < max_columns:
+                lst.append((c['COLUMN_NAME'], c['DATA_TYPE']))
+        # Build card
+        lines: list[str] = []
+        lines.append(f"Known tables in {database} for schemas: {', '.join(schemas)}")
+        for sch, tbl in table_keys:
+            col_list = cols_map.get((sch, tbl), [])
+            col_txt = ', '.join(f"{cn}({dt})" for cn, dt in col_list)
+            lines.append(f"  {database}.{sch}.{tbl}: {col_txt}")
+        return '\n'.join(lines)
+    except Exception:
+        return ''
+
 def extract_sql_from_text(text: str) -> str:
     t = (text or '').strip()
     # Strip common code fences/backticks
@@ -436,7 +490,7 @@ def extract_sql_from_text(text: str) -> str:
             i += 1
         if second_select_pos != -1:
             s = s[start:second_select_pos]
-        else:
+    else:
             s = s[start:]
         return s
 
@@ -466,6 +520,7 @@ def generate_sql_with_complete(
     )
     
     schema_context = f"Database: {database}, Schemas: {', '.join(schemas or [])}" if schemas else f"Database: {database}"
+    known_card = build_known_tables_context(session, database, schemas)
     
     # Add attempt-specific guidance and error repair context
     attempt_guidance = ""
@@ -485,10 +540,12 @@ If previous SQL or error info is included, fix the issue and output a single cor
         repair_lines.append("Requirements: \n- Fix the issue \n- Prefer simpler filters \n- Ensure it returns data \n- Output one SELECT/WITH query only")
         repair_block = "\n\n" + "\n".join(repair_lines)
     
-    full_prompt = f"""
+            full_prompt = f"""
 {system_rules}
 
 Context: {schema_context}
+Known objects (subset):
+{known_card}
 
 {attempt_guidance}{repair_block}
 
@@ -499,9 +556,9 @@ Only output SQL code. Do not include narrative sentences.
 """
     
     try:
-        res = session.sql(
+            res = session.sql(
             f"select snowflake.cortex.complete('mistral-large', $$ {full_prompt} $$) as c"
-        ).collect()[0][0]
+            ).collect()[0][0]
         sql_text = extract_sql_from_text(res)
         ok, err = validate_pipeline_sql(sql_text)
         if not ok:
@@ -625,7 +682,7 @@ def main():
                 attempt += 1
                 with st.spinner(f"🧠 Generating SQL (attempt {attempt}/{max_attempts})..."):
                     ok, sql_text, err = generate_sql_with_complete(
-                        session=session,
+                session=session,
                         database=st.session_state.get('source_db') or '',
                         schemas=st.session_state.get('source_schemas') or [],
                         user_prompt=user_input,
@@ -673,7 +730,7 @@ def main():
                         
                         success = True
                         
-                    except Exception as e:
+        except Exception as e:
                         err_msg = str(e)
                         st.warning(f"Attempt {attempt}: SQL failed to execute - {err_msg}")
                         # Show the exact SQL we attempted to run
