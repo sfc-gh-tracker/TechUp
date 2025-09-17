@@ -1,3 +1,5 @@
+# COMMIT: 46bac48 - feat(streamlit): ground model with INFORMATION_SCHEMA known tables/columns for selected schemas
+# (This comment helps verify the synced app version.)
 import streamlit as st
 import pandas as pd
 import json
