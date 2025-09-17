@@ -449,6 +449,15 @@ def extract_used_fq_tables(sql_text: str) -> set[str]:
 
 def extract_sql_from_text(text: str) -> str:
     t = (text or '').strip()
+    # Prefer explicit markers if present
+    if '<<SQL>>' in t and '<<ENDSQL>>' in t:
+        try:
+            start = t.index('<<SQL>>') + len('<<SQL>>')
+            end = t.index('<<ENDSQL>>', start)
+            marked = t[start:end].strip()
+            return _simple_sql_auto_repair(_strip_narrative_lines(marked))
+        except Exception:
+            pass
     # Strip common code fences/backticks
     if t.startswith('```'):
         t = t.strip('`')
@@ -584,7 +593,7 @@ If previous SQL or error info is included, fix the issue and output a single cor
         repair_lines.append("Requirements: \n- Fix the issue \n- Prefer simpler filters \n- Ensure it returns data \n- Output one SELECT/WITH query only")
         repair_block = "\n\n" + "\n".join(repair_lines)
     
-            full_prompt = f"""
+    full_prompt = f"""
 {system_rules}
 
 Context: {schema_context}
@@ -596,7 +605,10 @@ Known objects (subset):
 User request: {user_prompt}
 
 Generate a working SQL query that will return actual data. Use realistic filters and common table/column names.
-Only output SQL code. Do not include narrative sentences.
+Output ONLY the SQL between these markers:
+<<SQL>>
+-- your SQL here
+<<ENDSQL>>
 """
     
     try:
