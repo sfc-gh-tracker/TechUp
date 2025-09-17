@@ -353,7 +353,67 @@ def extract_sql_from_text(text: str) -> str:
                     return sql[:i]
             prev_char = ch
         return sql
+    def _reduce_to_single_top_level_select(sql: str) -> str:
+        s = sql
+        lower = s.lower()
+        n = len(s)
+        in_single = False
+        in_double = False
+        depth = 0
+        prev = ''
+        # find first top-level WITH or SELECT
+        start = 0
+        i = 0
+        while i < n:
+            ch = s[i]
+            if ch == "'" and not in_double and prev != '\\':
+                in_single = not in_single
+            elif ch == '"' and not in_single and prev != '\\':
+                in_double = not in_double
+            elif not in_single and not in_double:
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                elif depth == 0:
+                    # check for tokens at top-level
+                    if lower.startswith('with', i) or lower.startswith('select', i):
+                        start = i
+                        break
+            prev = ch
+            i += 1
+        # find second top-level SELECT after start
+        i = start + 6
+        prev = ''
+        in_single = False
+        in_double = False
+        depth = 0
+        second_select_pos = -1
+        while i < n:
+            ch = s[i]
+            if ch == "'" and not in_double and prev != '\\':
+                in_single = not in_single
+            elif ch == '"' and not in_single and prev != '\\':
+                in_double = not in_double
+            elif not in_single and not in_double:
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                elif depth == 0:
+                    if lower.startswith('select', i):
+                        second_select_pos = i
+                        break
+            prev = ch
+            i += 1
+        if second_select_pos != -1:
+            s = s[start:second_select_pos]
+        else:
+            s = s[start:]
+        return s
+
     t = _truncate_top_level(t)
+    t = _reduce_to_single_top_level_select(t)
     return _simple_sql_auto_repair(t.strip())
 
 def generate_sql_with_complete(
