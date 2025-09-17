@@ -283,6 +283,32 @@ create table if not exists PIPELINE_CONFIG (
 # 🤖 CORTEX COMPLETE SQL GENERATOR
 # ================================
 
+def _simple_sql_auto_repair(sql_text: str) -> str:
+    """Heuristically fix common LLM SQL formatting issues (dangling parens, code fences)."""
+    if not sql_text:
+        return sql_text
+    # Drop code-fence cruft and standalone ')' lines
+    filtered_lines = []
+    for raw in sql_text.splitlines():
+        s = raw.strip()
+        if not s:
+            filtered_lines.append(raw)
+            continue
+        if s in ('```', '```sql', 'sql'):
+            continue
+        if s == ')':
+            # Likely a dangling closing paren from truncated CTE
+            continue
+        filtered_lines.append(raw)
+    s = "\n".join(filtered_lines).strip()
+    # Trim unmatched trailing ')'
+    open_paren = s.count('(')
+    close_paren = s.count(')')
+    while close_paren > open_paren and s.endswith(')'):
+        s = s[:-1].rstrip()
+        close_paren -= 1
+    return s
+
 def extract_sql_from_text(text: str) -> str:
     t = (text or '').strip()
     # Strip common code fences/backticks
@@ -299,7 +325,7 @@ def extract_sql_from_text(text: str) -> str:
     semi_idx = t.find(';')
     if semi_idx != -1:
         t = t[:semi_idx]
-    return t.strip()
+    return _simple_sql_auto_repair(t.strip())
 
 def generate_sql_with_complete(
     session: Session,
@@ -317,7 +343,8 @@ def generate_sql_with_complete(
         "Do NOT use USE/SET or any DDL/DML (CREATE/ALTER/DROP/INSERT/UPDATE/DELETE/MERGE/TRUNCATE/CALL/GRANT/REVOKE/COPY). "
         "Use fully qualified identifiers: DATABASE.SCHEMA.TABLE. "
         "Generate queries that will return actual data with realistic WHERE clauses and filters. "
-        "Avoid queries that might return empty results."
+        "Avoid queries that might return empty results. "
+        "Ensure SQL syntax is valid and parentheses are balanced. Do not output stray ')' lines or code fences."
     )
     
     schema_context = f"Database: {database}, Schemas: {', '.join(schemas or [])}" if schemas else f"Database: {database}"
@@ -496,7 +523,9 @@ def main():
                 # Test the generated SQL
                 with st.spinner(f"🔍 Testing SQL (attempt {attempt}/{max_attempts})..."):
                     try:
-                        test_results = session.sql(sql_text).collect()
+                        # Last-mile heuristic repair before execution
+                        candidate_sql = _simple_sql_auto_repair(sql_text)
+                        test_results = session.sql(candidate_sql).collect()
                         if len(test_results) == 0:
                             st.warning(f"Attempt {attempt}: SQL executed but returned no rows")
                             last_sql = sql_text
@@ -504,9 +533,9 @@ def main():
                             continue
                         
                         # Success! SQL works and returns data
-                        st.session_state['last_sql'] = sql_text
-                        st.session_state['pending_sql'] = sql_text
-                        st.session_state.messages.append({"role": "assistant", "content": sql_text})
+                        st.session_state['last_sql'] = candidate_sql
+                        st.session_state['pending_sql'] = candidate_sql
+                        st.session_state.messages.append({"role": "assistant", "content": candidate_sql})
                         
                         # Show preview of first 3 records
                         preview_df = pd.DataFrame(test_results[:3])
@@ -519,7 +548,7 @@ def main():
                     except Exception as e:
                         err_msg = str(e)
                         st.warning(f"Attempt {attempt}: SQL failed to execute - {err_msg}")
-                        last_sql = sql_text
+                        last_sql = candidate_sql
                         last_error = err_msg
                         continue
             
