@@ -405,6 +405,48 @@ order by table_schema, table_name, ordinal_position
     except Exception:
         return ''
 
+
+def fetch_known_tables_set(session: Session, database: str, schemas: list[str]) -> set[str]:
+    """Return a set of fully qualified table/view names (uppercase) for existence checks."""
+    try:
+        if not database or not schemas:
+            return set()
+        schema_list = ','.join(_sql_literal(s) for s in schemas)
+        q = f"""
+select upper('{database}') as db, upper(table_schema) as sch, upper(table_name) as tbl
+from {database}.information_schema.tables
+where table_schema in ({schema_list})
+  and table_type in ('BASE TABLE','VIEW')
+union all
+select upper('{database}') as db, upper(table_schema) as sch, upper(table_name) as tbl
+from {database}.information_schema.views
+where table_schema in ({schema_list})
+        """
+        rows = session.sql(q).collect()
+        return {f"{r['DB']}.{r['SCH']}.{r['TBL']}" for r in rows}
+    except Exception:
+        return set()
+
+
+def _normalize_ident(part: str) -> str:
+    p = part.strip()
+    if p.startswith('"') and p.endswith('"') and len(p) >= 2:
+        p = p[1:-1].replace('""', '"')
+    return p.upper()
+
+
+def extract_used_fq_tables(sql_text: str) -> set[str]:
+    """Extract fully qualified table references DATABASE.SCHEMA.TABLE from SQL (rough regex)."""
+    if not sql_text:
+        return set()
+    import re as _re
+    pattern = _re.compile(r'(?:\b|\s)("[^"]+"|[A-Za-z0-9_]+)\.("[^"]+"|[A-Za-z0-9_]+)\.("[^"]+"|[A-Za-z0-9_]+)(?:\b|\s)')
+    refs: set[str] = set()
+    for m in pattern.finditer(sql_text):
+        db, sch, tbl = m.group(1), m.group(2), m.group(3)
+        refs.add(f"{_normalize_ident(db)}.{_normalize_ident(sch)}.{_normalize_ident(tbl)}")
+    return refs
+
 def extract_sql_from_text(text: str) -> str:
     t = (text or '').strip()
     # Strip common code fences/backticks
@@ -680,6 +722,7 @@ def main():
             
             last_sql = None
             last_error = None
+            known_set = fetch_known_tables_set(session, st.session_state.get('source_db') or '', st.session_state.get('source_schemas') or [])
             while attempt < max_attempts and not success:
                 attempt += 1
                 with st.spinner(f"🧠 Generating SQL (attempt {attempt}/{max_attempts})..."):
@@ -712,6 +755,15 @@ def main():
                     try:
                         # Last-mile heuristic repair before execution
                         candidate_sql = _simple_sql_auto_repair(_strip_narrative_lines(sql_text))
+                        # Pre-check referenced tables exist
+                        used_refs = extract_used_fq_tables(candidate_sql)
+                        missing = sorted([r for r in used_refs if r not in known_set])
+                        if missing:
+                            msg = "; ".join(missing)
+                            st.warning(f"Attempt {attempt}: Skipping execution; objects do not exist or unauthorized: {msg}")
+                            last_sql = candidate_sql
+                            last_error = "Missing objects: " + msg
+                            continue
                         test_results = session.sql(candidate_sql).collect()
                         if len(test_results) == 0:
                             st.warning(f"Attempt {attempt}: SQL executed but returned no rows")
