@@ -333,10 +333,27 @@ def extract_sql_from_text(text: str) -> str:
         start_idx = lower.find('with')
     if start_idx >= 0:
         t = t[start_idx:]
-    # Truncate at first semicolon if multiple statements returned
-    semi_idx = t.find(';')
-    if semi_idx != -1:
-        t = t[:semi_idx]
+    # Truncate at first top-level semicolon (paren-balanced, not inside quotes)
+    def _truncate_top_level(sql: str) -> str:
+        depth = 0
+        in_single = False
+        in_double = False
+        prev_char = ''
+        for i, ch in enumerate(sql):
+            if ch == "'" and not in_double and prev_char != '\\':
+                in_single = not in_single
+            elif ch == '"' and not in_single and prev_char != '\\':
+                in_double = not in_double
+            elif not in_single and not in_double:
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                elif ch == ';' and depth <= 0:
+                    return sql[:i]
+            prev_char = ch
+        return sql
+    t = _truncate_top_level(t)
     return _simple_sql_auto_repair(t.strip())
 
 def generate_sql_with_complete(
@@ -560,8 +577,12 @@ def main():
                     except Exception as e:
                         err_msg = str(e)
                         st.warning(f"Attempt {attempt}: SQL failed to execute - {err_msg}")
+                        # Provide structured error summary to model
                         last_sql = candidate_sql
-                        last_error = err_msg
+                        last_error = (
+                            "Execution failed. Error summary: " + err_msg +
+                            "\nCommon causes: unbalanced parentheses at line starts, missing FROM, or truncated WITH CTE."
+                        )
                         continue
             
             if not success:
