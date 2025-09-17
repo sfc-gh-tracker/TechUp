@@ -301,8 +301,16 @@ def extract_sql_from_text(text: str) -> str:
         t = t[:semi_idx]
     return t.strip()
 
-def generate_sql_with_complete(session: Session, database: str, schemas: list[str], user_prompt: str, attempt: int = 1) -> tuple[bool, str, str]:
-    """Enhanced Cortex COMPLETE call with retry-aware prompting"""
+def generate_sql_with_complete(
+    session: Session,
+    database: str,
+    schemas: list[str],
+    user_prompt: str,
+    attempt: int = 1,
+    error_context: str | None = None,
+    previous_sql: str | None = None,
+) -> tuple[bool, str, str]:
+    """Enhanced Cortex COMPLETE call with retry-aware prompting and error repair."""
     
     system_rules = (
         "Return a single SELECT or WITH query only. No semicolons. "
@@ -314,23 +322,30 @@ def generate_sql_with_complete(session: Session, database: str, schemas: list[st
     
     schema_context = f"Database: {database}, Schemas: {', '.join(schemas or [])}" if schemas else f"Database: {database}"
     
-    # Add attempt-specific guidance
+    # Add attempt-specific guidance and error repair context
     attempt_guidance = ""
     if attempt > 1:
         attempt_guidance = f"""
-This is attempt #{attempt}. Previous attempts may have failed due to:
-- Empty results (add broader WHERE conditions)
-- Non-existent tables (use common table names like CUSTOMERS, ORDERS, SALES, TRANSACTIONS)
-- Complex joins (try simpler single-table queries first)
-Please generate a different, simpler query that's more likely to return data.
+This is attempt #{attempt}. Make a corrected query that is more likely to return rows.
+If previous SQL or error info is included, fix the issue and output a single corrected query.
 """
+
+    repair_block = ""
+    if error_context or previous_sql:
+        repair_lines = ["Context for repair:"]
+        if previous_sql:
+            repair_lines.append("Previous SQL:\n" + previous_sql)
+        if error_context:
+            repair_lines.append("Error observed:\n" + error_context)
+        repair_lines.append("Requirements: \n- Fix the issue \n- Prefer simpler filters \n- Ensure it returns data \n- Output one SELECT/WITH query only")
+        repair_block = "\n\n" + "\n".join(repair_lines)
     
     full_prompt = f"""
 {system_rules}
 
 Context: {schema_context}
 
-{attempt_guidance}
+{attempt_guidance}{repair_block}
 
 User request: {user_prompt}
 
@@ -458,6 +473,8 @@ def main():
             attempt = 0
             success = False
             
+            last_sql = None
+            last_error = None
             while attempt < max_attempts and not success:
                 attempt += 1
                 with st.spinner(f"🧠 Generating SQL (attempt {attempt}/{max_attempts})..."):
@@ -466,11 +483,14 @@ def main():
                         database=st.session_state.get('source_db') or '',
                         schemas=st.session_state.get('source_schemas') or [],
                         user_prompt=user_input,
-                        attempt=attempt
+                        attempt=attempt,
+                        error_context=last_error,
+                        previous_sql=last_sql
                     )
                 
                 if not ok:
                     st.warning(f"Attempt {attempt} failed validation: {err}")
+                    last_error = err
                     continue
                 
                 # Test the generated SQL
@@ -479,6 +499,8 @@ def main():
                         test_results = session.sql(sql_text).collect()
                         if len(test_results) == 0:
                             st.warning(f"Attempt {attempt}: SQL executed but returned no rows")
+                            last_sql = sql_text
+                            last_error = "The query returned zero rows. Broaden filters, adjust joins, or choose different tables."
                             continue
                         
                         # Success! SQL works and returns data
@@ -495,7 +517,10 @@ def main():
                         success = True
                         
                     except Exception as e:
-                        st.warning(f"Attempt {attempt}: SQL failed to execute - {str(e)}")
+                        err_msg = str(e)
+                        st.warning(f"Attempt {attempt}: SQL failed to execute - {err_msg}")
+                        last_sql = sql_text
+                        last_error = err_msg
                         continue
             
             if not success:
