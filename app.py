@@ -311,6 +311,71 @@ def parse_invalid_identifier_from_error(err_msg: str) -> List[str]:
     ident = m.group(1)
     return [ident]
 
+def extract_order_by_unqualified_columns(sql_text: str) -> List[str]:
+    """Extract unqualified column tokens from ORDER BY clause(s)."""
+    if not sql_text:
+        return []
+    cols: List[str] = []
+    for m in re.finditer(r"(?is)\border\s+by\s+(.*?)(?:(?:limit|offset|fetch)\b|$)", sql_text):
+        clause = m.group(1)
+        # split by commas not within parentheses
+        parts = re.split(r",(?![^()]*\))", clause)
+        for p in parts:
+            token = p.strip()
+            # remove ASC/DESC and NULLS FIRST/LAST
+            token = re.sub(r"(?i)\b(asc|desc)\b", "", token)
+            token = re.sub(r"(?i)nulls\s+(first|last)", "", token)
+            token = token.strip()
+            # skip function calls and qualified refs (handled elsewhere)
+            if not token or '(' in token or '.' in token:
+                continue
+            # simple identifier
+            m2 = re.match(r"^[A-Za-z_][\w$]*$|^\"[^\"]+\"$", token)
+            if m2:
+                cols.append(token.replace('"', ''))
+    return cols
+
+def find_missing_order_by_columns(sql_text: str, schema_catalog: Dict[str, set]) -> Tuple[List[str], List[str]]:
+    """Return (missing_specs, ambiguous_notes) for unqualified ORDER BY columns.
+    If only one table is present in FROM/JOIN aliases, validate against it.
+    If multiple tables, attempt to resolve by unique match across catalog; otherwise mark ambiguous.
+    """
+    aliases = extract_table_aliases(sql_text)
+    base_tables = list(set(aliases.values())) if aliases else []
+    unq_cols = extract_order_by_unqualified_columns(sql_text)
+    missing: List[str] = []
+    ambiguous_notes: List[str] = []
+    if not unq_cols:
+        return missing, ambiguous_notes
+
+    # Precompute reverse index: column -> tables containing it
+    col_to_tables: Dict[str, List[str]] = {}
+    for t, cols in schema_catalog.items():
+        for c in cols:
+            col_to_tables.setdefault(c.upper(), []).append(t)
+
+    for col in unq_cols:
+        col_u = col.upper()
+        candidate_tables = col_to_tables.get(col_u, [])
+        if len(base_tables) == 1:
+            base = base_tables[0]
+            if base not in schema_catalog or col_u not in {c.upper() for c in schema_catalog.get(base, set())}:
+                missing.append(f"{base}.{col}")
+        else:
+            if len(candidate_tables) == 1:
+                # Suggest qualification if not already
+                base = candidate_tables[0]
+                # not strictly missing, but enforce qualification; if base not in aliases, we still require LLM to adjust
+                # We'll not add to missing, but provide ambiguous note
+                ambiguous_notes.append(f"Qualify ORDER BY {col} with table {base} (unqualified reference).")
+            elif len(candidate_tables) == 0:
+                missing.append(col)
+            else:
+                ambiguous_notes.append(
+                    f"ORDER BY column {col} exists in multiple tables: {', '.join(candidate_tables)}. Qualify explicitly."
+                )
+    return sorted(list(dict.fromkeys(missing))), ambiguous_notes
+
 def insert_into_pipeline_factory(session, pipeline_id: str, source_table: str, sql_snippet: str, 
                                 target_dt_name: str, lag_minutes: int, warehouse: str) -> bool:
     """Insert the generated SQL into the PIPELINE_CONFIG table."""
@@ -476,12 +541,20 @@ def main():
         last_error = ""
         for attempt in range(1, max_retries + 1):
             try:
-                # Validate columns exist before running
+                # Validate columns exist before running (SELECT and ORDER BY)
                 missing_cols = find_missing_columns(st.session_state['generated_sql'], schema_catalog)
-                if missing_cols:
+                missing_order_cols, ambiguous_order = find_missing_order_by_columns(
+                    st.session_state['generated_sql'], schema_catalog
+                )
+                if ambiguous_order:
+                    for note in ambiguous_order:
+                        validation_messages.append(note)
+                # Merge missing issues
+                all_missing = sorted(list(dict.fromkeys(missing_cols + missing_order_cols)))
+                if all_missing:
                     addl = (
                         "Remove or replace these invalid columns because they do not exist in the referenced tables: "
-                        + ", ".join(missing_cols)
+                        + ", ".join(all_missing)
                         + ". Use only existing columns from the schema context."
                     )
                     regenerated = generate_sql_with_cortex(
