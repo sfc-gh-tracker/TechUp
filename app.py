@@ -175,6 +175,80 @@ Important guidelines:
         st.error(f"Error generating SQL with Cortex: {str(e)}")
         return None
 
+def validate_sql_with_cortex(
+    session,
+    schema_metadata: str,
+    schema_catalog: Dict[str, set],
+    candidate_sql: str,
+    database: str,
+    schema: str,
+    error_context: str = ""
+) -> Optional[str]:
+    """Ask Cortex to validate/fix SQL using schema metadata and a table->columns map.
+    Returns corrected SQL or None.
+    """
+    try:
+        catalog_json = json.dumps({t: sorted(list(cols)) for t, cols in schema_catalog.items()})
+        system_prompt = (
+            "You are a Snowflake SQL validator and fixer. Given a schema and a candidate SQL, "
+            "return a single corrected SQL statement that strictly uses only existing tables/columns, "
+            "adds necessary JOINs when referencing columns from other tables (prefer ID-like join keys), "
+            "fully-qualifies identifiers as database.schema.table, and avoids DDL/USE/SET."
+        )
+        user_prompt = f"""
+Database: {database}
+Schema: {schema}
+
+Schema summary:
+---
+{schema_metadata}
+---
+
+Schema catalog (JSON mapping of table -> columns):
+{catalog_json}
+
+Candidate SQL to validate/fix:
+---
+{candidate_sql}
+---
+
+Rules:
+- Use only tables and columns present in the schema catalog above.
+- If ORDER BY or SELECT references a column from a table not in FROM/JOIN, add the appropriate JOIN with an explicit ON using a reasonable shared key (prefer *_ID/ID/_KEY).
+- If a column does not exist, replace with the closest semantically correct existing column.
+- Fully qualify all table references as {database}.{schema}.table.
+- Return only the corrected SQL (no explanations, no markdown, no code fences).
+- The SQL must be a single statement.
+{('Error context to fix: ' + error_context) if error_context else ''}
+"""
+
+        system_prompt_escaped = system_prompt.replace("'", "''")
+        user_prompt_escaped = user_prompt.replace("'", "''")
+
+        cortex_query = f"""
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+            'snowflake-arctic',
+            CONCAT(
+                '<s>[INST]',
+                '{system_prompt_escaped}',
+                '{user_prompt_escaped}',
+                '[/INST]'
+            )
+        ) as sql_response
+        """
+
+        result = session.sql(cortex_query).collect()
+        response_data = result[0]['SQL_RESPONSE']
+        cleaned_response = str(response_data).strip()
+        if cleaned_response.startswith('```sql'):
+            cleaned_response = cleaned_response.replace('```sql', '').replace('```', '').strip()
+        elif cleaned_response.startswith('```'):
+            cleaned_response = cleaned_response.replace('```', '').strip()
+        return cleaned_response
+    except Exception as e:
+        st.error(f"Error validating SQL with Cortex: {str(e)}")
+        return None
+
 def build_preview_sql(sql_text: str) -> str:
     """Wrap the generated SQL to safely preview the first 3 rows."""
     s = (sql_text or "").strip()
@@ -617,45 +691,19 @@ def main():
         last_error = ""
         for attempt in range(1, max_retries + 1):
             try:
-                # Validate columns and qualifiers exist before running (SELECT and ORDER BY)
-                missing_cols = find_missing_columns(st.session_state['generated_sql'], schema_catalog)
-                missing_order_cols, ambiguous_order = find_missing_order_by_columns(
-                    st.session_state['generated_sql'], schema_catalog
+                # First ask the model to validate/fix the candidate SQL using schema metadata and catalog
+                validated = validate_sql_with_cortex(
+                    session,
+                    schema_metadata,
+                    schema_catalog,
+                    st.session_state['generated_sql'],
+                    selected_database,
+                    selected_schema,
+                    ""
                 )
-                invalid_order_qualifiers = find_order_by_qualifiers_not_in_from(
-                    st.session_state['generated_sql']
-                )
-                if ambiguous_order:
-                    for note in ambiguous_order:
-                        validation_messages.append(note)
-                # Merge missing issues
-                all_missing = sorted(list(dict.fromkeys(missing_cols + missing_order_cols)))
-                if invalid_order_qualifiers:
-                    validation_messages.append(
-                        "ORDER BY uses qualifiers not present in FROM/JOIN: " + ", ".join(invalid_order_qualifiers)
-                    )
-                    # Encourage the model to use qualifiers from the FROM/JOIN only
-                    all_missing = sorted(list(dict.fromkeys(all_missing + invalid_order_qualifiers)))
-                if all_missing:
-                    addl = (
-                        "Remove or replace these invalid columns because they do not exist in the referenced tables: "
-                        + ", ".join(all_missing)
-                        + ". Use only existing columns from the schema context."
-                    )
-                    regenerated = generate_sql_with_cortex(
-                        session,
-                        schema_metadata,
-                        st.session_state['user_question'],
-                        selected_database,
-                        selected_schema,
-                        False,
-                        addl
-                    )
-                    if regenerated:
-                        regenerated = qualify_sql(regenerated, selected_database, selected_schema)
-                        st.session_state['generated_sql'] = regenerated
-                    else:
-                        last_error = "Regeneration failed due to missing columns"
+                if validated:
+                    validated = qualify_sql(validated, selected_database, selected_schema)
+                    st.session_state['generated_sql'] = validated
 
                 preview_sql = build_preview_sql(st.session_state['generated_sql'])
                 with st.spinner(f"Running preview (attempt {attempt}/{max_retries})..."):
@@ -719,13 +767,13 @@ def main():
                 addl_parts.append("Use only tables and columns present in the provided schema context.")
                 addl_parts.append("If a column doesn't exist, choose appropriate alternatives to ensure the query runs.")
                 addl = "\n".join(addl_parts)
-                regenerated = generate_sql_with_cortex(
+                regenerated = validate_sql_with_cortex(
                     session,
                     schema_metadata,
-                    st.session_state['user_question'],
+                    schema_catalog,
+                    st.session_state['generated_sql'] + "\n-- Fix per errors above",
                     selected_database,
                     selected_schema,
-                    False,
                     addl
                 )
                 if regenerated:
