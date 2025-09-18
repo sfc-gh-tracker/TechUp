@@ -22,6 +22,7 @@ Setup Instructions:
 import streamlit as st
 import pandas as pd
 import json
+import re
 from typing import Dict, List, Optional, Tuple
 from snowflake.snowpark.context import get_active_session
 
@@ -185,6 +186,38 @@ with __q as (
 select * from __q limit 3
 """
 
+def qualify_sql(sql_text: str, database: str, schema: str) -> str:
+    """Best-effort qualification of unqualified table references in FROM/JOIN.
+    This is heuristic and avoids touching subqueries or already qualified names.
+    """
+    if not sql_text:
+        return sql_text
+
+    q_db = '"' + database.replace('"', '""') + '"'
+    q_schema = '"' + schema.replace('"', '""') + '"'
+
+    def repl(match: re.Match) -> str:
+        keyword = match.group(1)
+        ident = match.group(2)
+        tail = match.group(3) or ''
+        ident_strip = ident.strip()
+        lower = ident_strip.lower()
+        # Skip subqueries, functions, stages, CTE refs, or already qualified
+        if ident_strip.startswith('(') or ident_strip.startswith('@') or '.' in ident_strip or lower.startswith('table('):
+            return f"{keyword} {ident}{tail}"
+        return f"{keyword} {q_db}.{q_schema}.{ident}{tail}"
+
+    # FROM and JOIN targets
+    pattern = re.compile(r"(?i)\b(FROM|JOIN)\s+(\(?\s*(?:\"[^\"]+\"|[A-Za-z_][\w$]*))(\b)")
+    qualified = re.sub(pattern, repl, sql_text)
+    return qualified
+
+def use_context(session, database: str, schema: str) -> None:
+    q_db = '"' + database.replace('"', '""') + '"'
+    q_schema = '"' + schema.replace('"', '""') + '"'
+    session.sql(f"use database {q_db}").collect()
+    session.sql(f"use schema {q_schema}").collect()
+
 def insert_into_pipeline_factory(session, pipeline_id: str, source_table: str, sql_snippet: str, 
                                 target_dt_name: str, lag_minutes: int, warehouse: str) -> bool:
     """Insert the generated SQL into the PIPELINE_CONFIG table."""
@@ -282,6 +315,8 @@ def main():
                 return
                 
             with st.spinner("Fetching schema metadata..."):
+                # Ensure session context matches the selected DB/Schema
+                use_context(session, selected_database, selected_schema)
                 schema_metadata, schema_truncated = get_schema_metadata(
                     session, selected_database, selected_schema, max_tables, max_columns_per_table
                 )
@@ -294,6 +329,9 @@ def main():
                 generated_sql = generate_sql_with_cortex(
                     session, schema_metadata, user_question, selected_database, selected_schema, schema_truncated
                 )
+                if generated_sql:
+                    # Best-effort fully qualify any unqualified identifiers
+                    generated_sql = qualify_sql(generated_sql, selected_database, selected_schema)
             
             if generated_sql:
                 st.session_state['generated_sql'] = generated_sql
@@ -319,22 +357,18 @@ def main():
         st.header("🎯 Generated SQL Query")
         st.code(st.session_state['generated_sql'], language='sql')
         
-        # Preview results
-        st.header("🔎 Preview Results")
-        if st.button("Run Preview (Top 3 rows)", use_container_width=True):
-            try:
-                preview_sql = build_preview_sql(st.session_state['generated_sql'])
-                with st.spinner("Running preview query..."):
-                    preview_df = session.sql(preview_sql).to_pandas()
-                st.caption("Showing up to 3 rows")
-                st.dataframe(preview_df, use_container_width=True)
-                st.session_state['preview_df'] = preview_df
-            except Exception as e:
-                st.error(f"Error running preview: {str(e)}")
-
-        if 'preview_df' in st.session_state:
-            with st.expander("Last preview results", expanded=False):
-                st.dataframe(st.session_state['preview_df'], use_container_width=True)
+        # Auto preview results
+        st.header("🔎 Preview Results (Top 3 rows)")
+        try:
+            use_context(session, selected_database, selected_schema)
+            preview_sql = build_preview_sql(st.session_state['generated_sql'])
+            with st.spinner("Running preview query..."):
+                preview_df = session.sql(preview_sql).to_pandas()
+            st.caption("Showing up to 3 rows")
+            st.dataframe(preview_df, use_container_width=True)
+            st.session_state['preview_df'] = preview_df
+        except Exception as e:
+            st.error(f"Error running preview: {str(e)}")
 
         # Pipeline Factory Integration
         st.header("🏭 Add to Pipeline Factory")
