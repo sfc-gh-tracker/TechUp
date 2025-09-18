@@ -213,10 +213,8 @@ def qualify_sql(sql_text: str, database: str, schema: str) -> str:
     return qualified
 
 def use_context(session, database: str, schema: str) -> None:
-    q_db = '"' + database.replace('"', '""') + '"'
-    q_schema = '"' + schema.replace('"', '""') + '"'
-    session.sql(f"use database {q_db}").collect()
-    session.sql(f"use schema {q_schema}").collect()
+    # No-op placeholder; USE is not supported in some Streamlit contexts.
+    return None
 
 def insert_into_pipeline_factory(session, pipeline_id: str, source_table: str, sql_snippet: str, 
                                 target_dt_name: str, lag_minutes: int, warehouse: str) -> bool:
@@ -315,8 +313,6 @@ def main():
                 return
                 
             with st.spinner("Fetching schema metadata..."):
-                # Ensure session context matches the selected DB/Schema
-                use_context(session, selected_database, selected_schema)
                 schema_metadata, schema_truncated = get_schema_metadata(
                     session, selected_database, selected_schema, max_tables, max_columns_per_table
                 )
@@ -360,7 +356,6 @@ def main():
         # Auto preview results
         st.header("🔎 Preview Results (Top 3 rows)")
         try:
-            use_context(session, selected_database, selected_schema)
             preview_sql = build_preview_sql(st.session_state['generated_sql'])
             with st.spinner("Running preview query..."):
                 preview_df = session.sql(preview_sql).to_pandas()
