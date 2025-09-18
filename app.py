@@ -563,6 +563,58 @@ def suggest_join_instructions(missing_table: str, present_tables: List[str], cat
         return None
     return f"Join {missing_table} to {best} using column {best_key} (e.g., ON {best}.{best_key} = {missing_table}.{best_key})."
 
+def auto_repair_missing_orderby_join(
+    sql_text: str,
+    database: str,
+    schema: str,
+    catalog: Dict[str, set]
+) -> Optional[str]:
+    """If ORDER BY uses qualifier not present in FROM/JOIN, add a JOIN using shared key.
+    Heuristic string rewrite intended to fix simple cases like ordering by a column from another table.
+    """
+    if not sql_text:
+        return None
+    missing_quals = find_order_by_qualifiers_not_in_from(sql_text)
+    if not missing_quals:
+        return None
+    present_bases = get_present_base_tables(sql_text)
+    if not present_bases:
+        return None
+
+    # Only handle first missing qualifier for now
+    mtable = missing_quals[0]
+    # Pick a base table with a viable join key
+    chosen_base = None
+    chosen_key = None
+    for base in present_bases:
+        key = choose_best_join_key(base, mtable, catalog)
+        if key:
+            chosen_base = base
+            chosen_key = key
+            break
+    if not (chosen_base and chosen_key):
+        return None
+
+    q_db = '"' + database.replace('"', '""') + '"'
+    q_schema = '"' + schema.replace('"', '""') + '"'
+    fq_missing = f"{q_db}.{q_schema}.{mtable}"
+
+    # Find the FROM <target> portion to append JOIN
+    m = re.search(r"(?is)(\bfrom\s+[^\n;]+?)\s*(\bwhere\b|\bgroup\s+by\b|\border\s+by\b|\blimit\b|$)", sql_text)
+    if not m:
+        return None
+    from_clause = m.group(1)
+    tail_start = m.start(2) if m.group(2) else len(sql_text)
+
+    # If join already includes the missing table, skip
+    if re.search(rf"(?i)\bjoin\s+\Q{fq_missing}\E\b", sql_text):
+        return None
+
+    join_snippet = f" JOIN {fq_missing} ON {chosen_base}.{chosen_key} = {mtable}.{chosen_key}"
+    new_from = from_clause + join_snippet
+    repaired = sql_text[:m.start(1)] + new_from + sql_text[m.start(2):] if m.group(2) else sql_text[:m.start(1)] + new_from
+    return repaired
+
 def insert_into_pipeline_factory(session, pipeline_id: str, source_table: str, sql_snippet: str, 
                                 target_dt_name: str, lag_minutes: int, warehouse: str) -> bool:
     """Insert the generated SQL into the PIPELINE_CONFIG table."""
@@ -759,6 +811,16 @@ def main():
                     if validated_alt:
                         validated_alt = qualify_sql(validated_alt, selected_database, selected_schema)
                         st.session_state['generated_sql'] = validated_alt
+
+                # Attempt heuristic auto-repair for missing ORDER BY qualifier JOINs
+                repaired = auto_repair_missing_orderby_join(
+                    st.session_state['generated_sql'],
+                    selected_database,
+                    selected_schema,
+                    schema_catalog
+                )
+                if repaired:
+                    st.session_state['generated_sql'] = repaired
 
                 preview_sql = build_preview_sql(st.session_state['generated_sql'])
                 with st.spinner(f"Running preview (attempt {attempt}/{max_retries})..."):
