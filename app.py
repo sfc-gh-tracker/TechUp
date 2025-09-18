@@ -402,6 +402,56 @@ def find_order_by_qualifiers_not_in_from(sql_text: str) -> List[str]:
             invalid.append(qual)
     return sorted(list(dict.fromkeys(invalid)))
 
+def get_present_base_tables(sql_text: str) -> List[str]:
+    """Return list of base table simple names present in FROM/JOIN."""
+    aliases = extract_table_aliases(sql_text)
+    bases = list(dict.fromkeys(aliases.values())) if aliases else []
+    return [b.replace('"', '') for b in bases]
+
+def is_id_like(col: str) -> bool:
+    cu = col.upper()
+    return cu == 'ID' or cu.endswith('_ID') or cu.endswith('ID') or cu.endswith('_KEY')
+
+def choose_best_join_key(table_a: str, table_b: str, catalog: Dict[str, set]) -> Optional[str]:
+    """Pick a reasonable join column name shared by both tables, preferring *_ID/ID/_KEY."""
+    cols_a = {c.upper() for c in catalog.get(table_a, set())}
+    cols_b = {c.upper() for c in catalog.get(table_b, set())}
+    common = [c for c in cols_a.intersection(cols_b)]
+    if not common:
+        return None
+    # Prefer id-like
+    id_like = [c for c in common if is_id_like(c)]
+    if id_like:
+        # if multiple, pick the one with table token hint if available
+        return id_like[0]
+    # fallback to first common column
+    return common[0]
+
+def suggest_join_instructions(missing_table: str, present_tables: List[str], catalog: Dict[str, set]) -> Optional[str]:
+    """Suggest a JOIN instruction string for LLM given missing table and present ones."""
+    if not present_tables:
+        return None
+    # pick best present table by availability of id-like join key
+    best = None
+    best_key = None
+    for pt in present_tables:
+        key = choose_best_join_key(pt, missing_table, catalog)
+        if key:
+            best = pt
+            best_key = key
+            break
+    if not best:
+        # Try any common column
+        for pt in present_tables:
+            key = choose_best_join_key(pt, missing_table, catalog)
+            if key:
+                best = pt
+                best_key = key
+                break
+    if not best or not best_key:
+        return None
+    return f"Join {missing_table} to {best} using column {best_key} (e.g., ON {best}.{best_key} = {missing_table}.{best_key})."
+
 def insert_into_pipeline_factory(session, pipeline_id: str, source_table: str, sql_snippet: str, 
                                 target_dt_name: str, lag_minutes: int, warehouse: str) -> bool:
     """Insert the generated SQL into the PIPELINE_CONFIG table."""
@@ -641,6 +691,17 @@ def main():
                     table_simple = ident.split('.')[-1].replace('"', '')
                     if table_simple not in schema_catalog:
                         missing_targets.append(ident)
+                # If ORDER BY references a qualifier not in FROM/JOIN, suggest JOIN
+                invalid_order_qualifiers = find_order_by_qualifiers_not_in_from(
+                    st.session_state['generated_sql']
+                )
+                join_hints: List[str] = []
+                if invalid_order_qualifiers:
+                    present = get_present_base_tables(st.session_state['generated_sql'])
+                    for missing_table in invalid_order_qualifiers:
+                        hint = suggest_join_instructions(missing_table, present, schema_catalog)
+                        if hint:
+                            join_hints.append(hint)
                 invalid_from_error = parse_invalid_identifier_from_error(last_error)
                 addl_parts = []
                 if missing_targets:
@@ -651,6 +712,10 @@ def main():
                     addl_parts.append(
                         "Remove or replace this invalid identifier: " + ", ".join(invalid_from_error)
                     )
+                if join_hints:
+                    addl_parts.append("Add necessary JOINs based on schema relationships:")
+                    for j in join_hints:
+                        addl_parts.append("- " + j)
                 addl_parts.append("Use only tables and columns present in the provided schema context.")
                 addl_parts.append("If a column doesn't exist, choose appropriate alternatives to ensure the query runs.")
                 addl = "\n".join(addl_parts)
