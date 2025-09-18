@@ -248,6 +248,69 @@ def extract_referenced_tables(sql_text: str) -> List[str]:
         tables.append(ident)
     return tables
 
+def extract_table_aliases(sql_text: str) -> Dict[str, str]:
+    """Extract mapping of alias->base_table (simple name) from FROM/JOIN clauses."""
+    aliases: Dict[str, str] = {}
+    if not sql_text:
+        return aliases
+    pattern = re.compile(r"(?is)\b(FROM|JOIN)\s+((?:\"[^\"]+\"|[A-Za-z_][\w$]*)(?:\.(?:\"[^\"]+\"|[A-Za-z_][\w$]*)){0,2})\s*(?:AS\s+)?(?:\"([^\"]+)\"|([A-Za-z_][\w$]*))?")
+    for m in pattern.finditer(sql_text):
+        ident = (m.group(2) or '').strip()
+        alias = (m.group(3) or m.group(4) or '').strip()
+        if not ident:
+            continue
+        # base table simple name (last part of identifier)
+        base = ident.split('.')[-1].replace('"', '')
+        if alias:
+            aliases[alias.replace('"', '')] = base
+        else:
+            # Map the table name to itself for easy resolution
+            aliases[base] = base
+    return aliases
+
+def extract_column_references(sql_text: str) -> List[Tuple[str, str]]:
+    """Extract (qualifier, column) pairs like alias.column or table.column."""
+    refs: List[Tuple[str, str]] = []
+    if not sql_text:
+        return refs
+    pattern = re.compile(r"(?i)(\"[^\"]+\"|[A-Za-z_][\w$]*)\s*\.\s*(\"[^\"]+\"|[A-Za-z_][\w$]*)")
+    for m in pattern.finditer(sql_text):
+        left = m.group(1)
+        right = m.group(2)
+        refs.append((left.replace('"', ''), right.replace('"', '')))
+    return refs
+
+def find_missing_columns(sql_text: str, schema_catalog: Dict[str, set]) -> List[str]:
+    """Return list of 'table.column' that are not present per INFORMATION_SCHEMA."""
+    aliases = extract_table_aliases(sql_text)
+    refs = extract_column_references(sql_text)
+    missing: List[str] = []
+    for qual, col in refs:
+        base = aliases.get(qual, qual)
+        base_u = base.upper()
+        col_u = col.upper()
+        if base_u not in {t.upper(): None for t in schema_catalog.keys()}:
+            missing.append(f"{base}.{col}")
+            continue
+        # find actual table key case-insensitively
+        matched_table = next((t for t in schema_catalog.keys() if t.upper() == base_u), None)
+        if matched_table is None:
+            missing.append(f"{base}.{col}")
+            continue
+        if col_u not in {c.upper() for c in schema_catalog[matched_table]}:
+            missing.append(f"{base}.{col}")
+    # de-duplicate
+    return sorted(list(dict.fromkeys(missing)))
+
+def parse_invalid_identifier_from_error(err_msg: str) -> List[str]:
+    if not err_msg:
+        return []
+    m = re.search(r"invalid identifier '([^']+)'", err_msg, re.IGNORECASE)
+    if not m:
+        return []
+    ident = m.group(1)
+    return [ident]
+
 def insert_into_pipeline_factory(session, pipeline_id: str, source_table: str, sql_snippet: str, 
                                 target_dt_name: str, lag_minutes: int, warehouse: str) -> bool:
     """Insert the generated SQL into the PIPELINE_CONFIG table."""
@@ -409,10 +472,33 @@ def main():
         # Precompute schema catalog for basic validation on failure
         schema_catalog = get_schema_catalog(session, selected_database, selected_schema)
 
-        # Try to preview up to N times, possibly with additional instructions to the LLM
+        # Try to preview up to N times, validating columns before execution
         last_error = ""
         for attempt in range(1, max_retries + 1):
             try:
+                # Validate columns exist before running
+                missing_cols = find_missing_columns(st.session_state['generated_sql'], schema_catalog)
+                if missing_cols:
+                    addl = (
+                        "Remove or replace these invalid columns because they do not exist in the referenced tables: "
+                        + ", ".join(missing_cols)
+                        + ". Use only existing columns from the schema context."
+                    )
+                    regenerated = generate_sql_with_cortex(
+                        session,
+                        schema_metadata,
+                        st.session_state['user_question'],
+                        selected_database,
+                        selected_schema,
+                        False,
+                        addl
+                    )
+                    if regenerated:
+                        regenerated = qualify_sql(regenerated, selected_database, selected_schema)
+                        st.session_state['generated_sql'] = regenerated
+                    else:
+                        last_error = "Regeneration failed due to missing columns"
+
                 preview_sql = build_preview_sql(st.session_state['generated_sql'])
                 with st.spinner(f"Running preview (attempt {attempt}/{max_retries})..."):
                     df = session.sql(preview_sql).to_pandas()
@@ -447,10 +533,15 @@ def main():
                     table_simple = ident.split('.')[-1].replace('"', '')
                     if table_simple not in schema_catalog:
                         missing_targets.append(ident)
+                invalid_from_error = parse_invalid_identifier_from_error(last_error)
                 addl_parts = []
                 if missing_targets:
                     addl_parts.append(
                         "Do not reference these missing tables: " + ", ".join(missing_targets)
+                    )
+                if invalid_from_error:
+                    addl_parts.append(
+                        "Remove or replace this invalid identifier: " + ", ".join(invalid_from_error)
                     )
                 addl_parts.append("Use only tables and columns present in the provided schema context.")
                 addl_parts.append("If a column doesn't exist, choose appropriate alternatives to ensure the query runs.")
