@@ -376,6 +376,32 @@ def find_missing_order_by_columns(sql_text: str, schema_catalog: Dict[str, set])
                 )
     return sorted(list(dict.fromkeys(missing))), ambiguous_notes
 
+def extract_order_by_qualified_pairs(sql_text: str) -> List[Tuple[str, str]]:
+    """Extract qualified pairs like qualifier.column specifically from ORDER BY."""
+    pairs: List[Tuple[str, str]] = []
+    if not sql_text:
+        return pairs
+    # pull order by section(s)
+    for m in re.finditer(r"(?is)\border\s+by\s+(.*?)(?:(?:limit|offset|fetch)\b|$)", sql_text):
+        clause = m.group(1)
+        for m2 in re.finditer(r"(?i)(\"[^\"]+\"|[A-Za-z_][\w$]*)\s*\.\s*(\"[^\"]+\"|[A-Za-z_][\w$]*)", clause):
+            left = m2.group(1)
+            right = m2.group(2)
+            pairs.append((left.replace('"', ''), right.replace('"', '')))
+    return pairs
+
+def find_order_by_qualifiers_not_in_from(sql_text: str) -> List[str]:
+    """Return order-by qualifiers that aren't among FROM/JOIN aliases/base tables."""
+    aliases = extract_table_aliases(sql_text)
+    alias_keys = set(k.upper() for k in aliases.keys())
+    base_values = set(v.upper() for v in aliases.values())
+    invalid: List[str] = []
+    for qual, _col in extract_order_by_qualified_pairs(sql_text):
+        q_u = qual.upper()
+        if q_u not in alias_keys and q_u not in base_values:
+            invalid.append(qual)
+    return sorted(list(dict.fromkeys(invalid)))
+
 def insert_into_pipeline_factory(session, pipeline_id: str, source_table: str, sql_snippet: str, 
                                 target_dt_name: str, lag_minutes: int, warehouse: str) -> bool:
     """Insert the generated SQL into the PIPELINE_CONFIG table."""
@@ -541,16 +567,25 @@ def main():
         last_error = ""
         for attempt in range(1, max_retries + 1):
             try:
-                # Validate columns exist before running (SELECT and ORDER BY)
+                # Validate columns and qualifiers exist before running (SELECT and ORDER BY)
                 missing_cols = find_missing_columns(st.session_state['generated_sql'], schema_catalog)
                 missing_order_cols, ambiguous_order = find_missing_order_by_columns(
                     st.session_state['generated_sql'], schema_catalog
+                )
+                invalid_order_qualifiers = find_order_by_qualifiers_not_in_from(
+                    st.session_state['generated_sql']
                 )
                 if ambiguous_order:
                     for note in ambiguous_order:
                         validation_messages.append(note)
                 # Merge missing issues
                 all_missing = sorted(list(dict.fromkeys(missing_cols + missing_order_cols)))
+                if invalid_order_qualifiers:
+                    validation_messages.append(
+                        "ORDER BY uses qualifiers not present in FROM/JOIN: " + ", ".join(invalid_order_qualifiers)
+                    )
+                    # Encourage the model to use qualifiers from the FROM/JOIN only
+                    all_missing = sorted(list(dict.fromkeys(all_missing + invalid_order_qualifiers)))
                 if all_missing:
                     addl = (
                         "Remove or replace these invalid columns because they do not exist in the referenced tables: "
