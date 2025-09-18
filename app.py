@@ -35,7 +35,7 @@ st.set_page_config(
 )
 
 # App version - bump this on each update
-VERSION = "1.2"
+VERSION = "1.3"
 
 def render_version_badge() -> None:
     badge_css = """
@@ -867,7 +867,7 @@ def main():
                         regenerated_alt = qualify_sql(regenerated_alt, selected_database, selected_schema)
                         st.session_state['generated_sql'] = regenerated_alt
                     else:
-                    validation_messages.append("Regeneration failed after error: " + last_error)
+                        validation_messages.append("Regeneration failed after error: " + last_error)
 
         if preview_df is not None:
             st.caption("Showing up to 3 rows")
