@@ -118,7 +118,7 @@ def get_schema_metadata(
         st.error(f"Error fetching schema metadata: {str(e)}")
         return "", False
 
-def generate_sql_with_cortex(session, schema_metadata: str, user_question: str, database: str, schema: str, schema_truncated: bool = False) -> Optional[str]:
+def generate_sql_with_cortex(session, schema_metadata: str, user_question: str, database: str, schema: str, schema_truncated: bool = False, additional_instructions: str = "") -> Optional[str]:
     """Generate SQL using Snowflake Cortex AI."""
     try:
         system_prompt = "You are an expert Snowflake SQL data analyst. Your task is to write a single, clean, and efficient SQL query to answer the user's question based on the provided schema."
@@ -138,6 +138,7 @@ Important guidelines:
 - The query should be ready to run as-is
 - Focus on answering the specific business question asked
 {truncation_note}
+{additional_instructions}
 """
 
         # Construct the Cortex query - escape single quotes properly
@@ -215,6 +216,37 @@ def qualify_sql(sql_text: str, database: str, schema: str) -> str:
 def use_context(session, database: str, schema: str) -> None:
     # No-op placeholder; USE is not supported in some Streamlit contexts.
     return None
+
+def get_schema_catalog(session, database: str, schema: str) -> Dict[str, set]:
+    """Return mapping of table_name -> set(columns) for the selected db.schema."""
+    query = f"""
+    select table_name, column_name
+    from {database}.information_schema.columns
+    where table_schema = '{schema}'
+    order by table_name, ordinal_position
+    """
+    rows = session.sql(query).collect()
+    catalog: Dict[str, set] = {}
+    for r in rows:
+        t = r['TABLE_NAME']
+        c = r['COLUMN_NAME']
+        if t not in catalog:
+            catalog[t] = set()
+        catalog[t].add(c)
+    return catalog
+
+def extract_referenced_tables(sql_text: str) -> List[str]:
+    """Heuristically extract table identifiers following FROM/JOIN clauses."""
+    if not sql_text:
+        return []
+    pattern = re.compile(r"(?i)\b(FROM|JOIN)\s+((?:\"[^\"]+\"|[A-Za-z_][\w$]*)(?:\.(?:\"[^\"]+\"|[A-Za-z_][\w$]*)){0,2})")
+    tables = []
+    for m in pattern.finditer(sql_text):
+        ident = m.group(2)
+        # Strip trailing aliases
+        ident = re.split(r"\s+", ident)[0]
+        tables.append(ident)
+    return tables
 
 def insert_into_pipeline_factory(session, pipeline_id: str, source_table: str, sql_snippet: str, 
                                 target_dt_name: str, lag_minutes: int, warehouse: str) -> bool:
@@ -353,17 +385,89 @@ def main():
         st.header("🎯 Generated SQL Query")
         st.code(st.session_state['generated_sql'], language='sql')
         
-        # Auto preview results
+        # Validate and auto preview results with retries and schema checking
         st.header("🔎 Preview Results (Top 3 rows)")
-        try:
-            preview_sql = build_preview_sql(st.session_state['generated_sql'])
-            with st.spinner("Running preview query..."):
-                preview_df = session.sql(preview_sql).to_pandas()
+        validation_messages: List[str] = []
+        preview_df = None
+        max_retries = 5
+
+        # Precompute schema catalog for basic validation on failure
+        schema_catalog = get_schema_catalog(session, selected_database, selected_schema)
+
+        # Try to preview up to N times, possibly with additional instructions to the LLM
+        last_error = ""
+        for attempt in range(1, max_retries + 1):
+            try:
+                preview_sql = build_preview_sql(st.session_state['generated_sql'])
+                with st.spinner(f"Running preview (attempt {attempt}/{max_retries})..."):
+                    df = session.sql(preview_sql).to_pandas()
+                if df is not None and len(df.index) > 0:
+                    preview_df = df
+                    break
+                else:
+                    # No rows; ask LLM to regenerate with instruction to ensure rows
+                    validation_messages.append("No rows returned; retrying with stronger constraints.")
+                    addl = "Ensure the query returns at least a few rows based on available data. Avoid referencing non-existent columns."
+                    regenerated = generate_sql_with_cortex(
+                        session,
+                        schema_metadata,
+                        st.session_state['user_question'],
+                        selected_database,
+                        selected_schema,
+                        False,
+                        addl
+                    )
+                    if regenerated:
+                        regenerated = qualify_sql(regenerated, selected_database, selected_schema)
+                        st.session_state['generated_sql'] = regenerated
+                    else:
+                        last_error = "Regeneration failed"
+            except Exception as e:
+                last_error = str(e)
+                # Attempt to detect invalid identifiers and guide a regeneration
+                referenced = extract_referenced_tables(st.session_state['generated_sql'])
+                missing_targets = []
+                for ident in referenced:
+                    # Consider only last part as table when fully qualified
+                    table_simple = ident.split('.')[-1].replace('"', '')
+                    if table_simple not in schema_catalog:
+                        missing_targets.append(ident)
+                addl_parts = []
+                if missing_targets:
+                    addl_parts.append(
+                        "Do not reference these missing tables: " + ", ".join(missing_targets)
+                    )
+                addl_parts.append("Use only tables and columns present in the provided schema context.")
+                addl_parts.append("If a column doesn't exist, choose appropriate alternatives to ensure the query runs.")
+                addl = "\n".join(addl_parts)
+                regenerated = generate_sql_with_cortex(
+                    session,
+                    schema_metadata,
+                    st.session_state['user_question'],
+                    selected_database,
+                    selected_schema,
+                    False,
+                    addl
+                )
+                if regenerated:
+                    regenerated = qualify_sql(regenerated, selected_database, selected_schema)
+                    st.session_state['generated_sql'] = regenerated
+                else:
+                    validation_messages.append("Regeneration failed after error: " + last_error)
+
+        if preview_df is not None:
             st.caption("Showing up to 3 rows")
             st.dataframe(preview_df, use_container_width=True)
             st.session_state['preview_df'] = preview_df
-        except Exception as e:
-            st.error(f"Error running preview: {str(e)}")
+            if validation_messages:
+                with st.expander("Validation notes", expanded=False):
+                    for msg in validation_messages:
+                        st.write(msg)
+        else:
+            st.error("Unable to generate a working query that returns rows after multiple attempts.")
+            if last_error:
+                with st.expander("Last error", expanded=False):
+                    st.code(last_error)
 
         # Pipeline Factory Integration
         st.header("🏭 Add to Pipeline Factory")
