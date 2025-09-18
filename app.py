@@ -726,6 +726,9 @@ def main():
                 index=0,
                 help="Model used for SQL validation/fixes; fallback will use the other."
             )
+            debug_mode = st.checkbox(
+                "Enable debug mode (show intermediate SQL)", value=False
+            )
     
     # Main content area
     col1, col2 = st.columns([2, 1])
@@ -829,9 +832,11 @@ def main():
                     "",
                     primary_model
                 )
-                if validated:
+                if validated and validated.strip():
                     validated = qualify_sql(validated, selected_database, selected_schema)
                     st.session_state['generated_sql'] = validated
+                    if debug_mode:
+                        validation_messages.append(f"Model ({primary_model}) validated SQL.")
                 else:
                     # Fallback to a lighter model to avoid token limit issues
                     validated_alt = validate_sql_with_cortex(
@@ -844,9 +849,11 @@ def main():
                         "",
                         fallback_model
                     )
-                    if validated_alt:
+                    if validated_alt and validated_alt.strip():
                         validated_alt = qualify_sql(validated_alt, selected_database, selected_schema)
                         st.session_state['generated_sql'] = validated_alt
+                        if debug_mode:
+                            validation_messages.append(f"Model ({fallback_model}) validated SQL.")
 
                 # Attempt heuristic auto-repair for missing ORDER BY qualifier JOINs
                 repaired = auto_repair_missing_orderby_join(
@@ -857,6 +864,8 @@ def main():
                 )
                 if repaired:
                     st.session_state['generated_sql'] = repaired
+                    if debug_mode:
+                        validation_messages.append("Applied heuristic auto-join repair.")
 
                 preview_sql = build_preview_sql(st.session_state['generated_sql'])
                 with st.spinner(f"Running preview (attempt {attempt}/{max_retries})..."):
@@ -878,9 +887,11 @@ def main():
                         addl,
                         primary_model
                     )
-                    if regenerated:
+                    if regenerated and regenerated.strip():
                         regenerated = qualify_sql(regenerated, selected_database, selected_schema)
                         st.session_state['generated_sql'] = regenerated
+                        if debug_mode:
+                            validation_messages.append(f"Regenerated SQL with {primary_model} after no-rows.")
                     else:
                         # fallback model
                         regenerated_alt = generate_sql_with_cortex(
@@ -893,9 +904,11 @@ def main():
                             addl,
                             fallback_model
                         )
-                        if regenerated_alt:
+                        if regenerated_alt and regenerated_alt.strip():
                             regenerated_alt = qualify_sql(regenerated_alt, selected_database, selected_schema)
                             st.session_state['generated_sql'] = regenerated_alt
+                            if debug_mode:
+                                validation_messages.append(f"Regenerated SQL with {fallback_model} after no-rows.")
                         else:
                             last_error = "Regeneration failed"
             except Exception as e:
@@ -946,9 +959,11 @@ def main():
                     addl,
                     primary_model
                 )
-                if regenerated:
+                if regenerated and regenerated.strip():
                     regenerated = qualify_sql(regenerated, selected_database, selected_schema)
                     st.session_state['generated_sql'] = regenerated
+                    if debug_mode:
+                        validation_messages.append(f"Validated & fixed SQL with {primary_model} after error.")
                 else:
                     # Fallback model for regeneration
                     regenerated_alt = validate_sql_with_cortex(
@@ -961,9 +976,11 @@ def main():
                         addl,
                         fallback_model
                     )
-                    if regenerated_alt:
+                    if regenerated_alt and regenerated_alt.strip():
                         regenerated_alt = qualify_sql(regenerated_alt, selected_database, selected_schema)
                         st.session_state['generated_sql'] = regenerated_alt
+                        if debug_mode:
+                            validation_messages.append(f"Validated & fixed SQL with {fallback_model} after error.")
                     else:
                         validation_messages.append("Regeneration failed after error: " + last_error)
 
@@ -975,11 +992,17 @@ def main():
                 with st.expander("Validation notes", expanded=False):
                     for msg in validation_messages:
                         st.write(msg)
+            if debug_mode:
+                with st.expander("Debug: Final preview SQL", expanded=False):
+                    st.code(build_preview_sql(st.session_state['generated_sql']), language='sql')
         else:
             st.error("Unable to generate a working query that returns rows after multiple attempts.")
             if last_error:
                 with st.expander("Last error", expanded=False):
                     st.code(last_error)
+            if debug_mode and 'generated_sql' in st.session_state:
+                with st.expander("Debug: Last attempted SQL", expanded=False):
+                    st.code(st.session_state['generated_sql'], language='sql')
 
         # Pipeline Factory Integration
         st.header("🏭 Add to Pipeline Factory")
