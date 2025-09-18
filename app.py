@@ -35,7 +35,7 @@ st.set_page_config(
 )
 
 # App version - bump this on each update
-VERSION = "1.3"
+VERSION = "1.4"
 
 def render_version_badge() -> None:
     badge_css = """
@@ -90,7 +90,7 @@ def get_schema_metadata(
     schema: str,
     max_tables: int = 20,
     max_columns_per_table: int = 12,
-    max_chars: int = 6000,
+    max_chars: int = 2000,
 ) -> Tuple[str, bool]:
     """Fetch table/column metadata with limits to avoid LLM token overflow.
 
@@ -220,11 +220,11 @@ def validate_sql_with_cortex(
         compact_catalog: Dict[str, List[str]] = {}
         for t, cols in schema_catalog.items():
             if t.upper() in relevant:
-                compact_catalog[t] = sorted(list(cols))[:50]
+                compact_catalog[t] = sorted(list(cols))[:25]
         if not compact_catalog:
             # Fallback: first 10 tables alphabetically
-            for t in sorted(schema_catalog.keys())[:10]:
-                compact_catalog[t] = sorted(list(schema_catalog[t]))[:30]
+            for t in sorted(schema_catalog.keys())[:6]:
+                compact_catalog[t] = sorted(list(schema_catalog[t]))[:20]
         catalog_json = json.dumps(compact_catalog)
         system_prompt = (
             "You are a Snowflake SQL validator and fixer. Given a schema and a candidate SQL, "
@@ -232,6 +232,7 @@ def validate_sql_with_cortex(
             "adds necessary JOINs when referencing columns from other tables (prefer ID-like join keys), "
             "fully-qualifies identifiers as database.schema.table, and avoids DDL/USE/SET."
         )
+        # Extremely concise instructions to minimize tokens
         user_prompt = f"""
 Database: {database}
 Schema: {schema}
@@ -249,13 +250,12 @@ Candidate SQL to validate/fix:
 {candidate_sql}
 ---
 
-Rules:
-- Use only tables and columns present in the schema catalog above.
-- If ORDER BY or SELECT references a column from a table not in FROM/JOIN, add the appropriate JOIN with an explicit ON using a reasonable shared key (prefer *_ID/ID/_KEY).
-- If a column does not exist, replace with the closest semantically correct existing column.
-- Fully qualify all table references as {database}.{schema}.table.
-- Return only the corrected SQL (no explanations, no markdown, no code fences).
-- The SQL must be a single statement.
+Rules (be concise):
+- Use only tables/columns from catalog.
+- Add JOINs if needed (prefer ID-like keys).
+- Replace non-existent columns with best alternative.
+- Fully qualify as {database}.{schema}.table.
+- Return a single SQL statement only, no prose.
 {('Error context to fix: ' + error_context) if error_context else ''}
 """
 
@@ -705,7 +705,7 @@ def main():
         st.success(f"Connected to: {selected_database}.{selected_schema}")
 
         # Advanced controls for prompt size limits
-        with st.expander("Advanced (Prompt Size Limits)", expanded=False):
+        with st.expander("Advanced (Prompt & Model)", expanded=False):
             max_tables = st.number_input(
                 "Max tables to include in schema context",
                 min_value=5,
@@ -719,6 +719,12 @@ def main():
                 max_value=200,
                 value=12,
                 step=1
+            )
+            default_model = st.selectbox(
+                "Validation model",
+                options=["mistral-large", "snowflake-arctic"],
+                index=0,
+                help="Model used for SQL validation/fixes; fallback will use the other."
             )
     
     # Main content area
@@ -811,6 +817,8 @@ def main():
             try:
                 # First ask the model to validate/fix the candidate SQL using schema metadata and catalog
                 # Try primary model first
+                primary_model = default_model
+                fallback_model = 'snowflake-arctic' if primary_model == 'mistral-large' else 'mistral-large'
                 validated = validate_sql_with_cortex(
                     session,
                     schema_metadata,
@@ -819,7 +827,7 @@ def main():
                     selected_database,
                     selected_schema,
                     "",
-                    'snowflake-arctic'
+                    primary_model
                 )
                 if validated:
                     validated = qualify_sql(validated, selected_database, selected_schema)
@@ -834,7 +842,7 @@ def main():
                         selected_database,
                         selected_schema,
                         "",
-                        'mistral-large'
+                        fallback_model
                     )
                     if validated_alt:
                         validated_alt = qualify_sql(validated_alt, selected_database, selected_schema)
@@ -868,7 +876,7 @@ def main():
                         selected_schema,
                         False,
                         addl,
-                        'snowflake-arctic'
+                        primary_model
                     )
                     if regenerated:
                         regenerated = qualify_sql(regenerated, selected_database, selected_schema)
@@ -883,7 +891,7 @@ def main():
                             selected_schema,
                             False,
                             addl,
-                            'mistral-large'
+                            fallback_model
                         )
                         if regenerated_alt:
                             regenerated_alt = qualify_sql(regenerated_alt, selected_database, selected_schema)
@@ -936,7 +944,7 @@ def main():
                     selected_database,
                     selected_schema,
                     addl,
-                    'snowflake-arctic'
+                    primary_model
                 )
                 if regenerated:
                     regenerated = qualify_sql(regenerated, selected_database, selected_schema)
@@ -951,7 +959,7 @@ def main():
                         selected_database,
                         selected_schema,
                         addl,
-                        'mistral-large'
+                        fallback_model
                     )
                     if regenerated_alt:
                         regenerated_alt = qualify_sql(regenerated_alt, selected_database, selected_schema)
