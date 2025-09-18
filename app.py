@@ -22,7 +22,7 @@ Setup Instructions:
 import streamlit as st
 import pandas as pd
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from snowflake.snowpark.context import get_active_session
 
 # Page configuration
@@ -59,43 +59,71 @@ def get_schemas(session, database: str) -> List[str]:
         st.error(f"Error fetching schemas: {str(e)}")
         return []
 
-def get_schema_metadata(session, database: str, schema: str) -> str:
-    """Fetch table and column metadata for the selected database and schema."""
+def get_schema_metadata(
+    session,
+    database: str,
+    schema: str,
+    max_tables: int = 20,
+    max_columns_per_table: int = 12,
+    max_chars: int = 6000,
+) -> Tuple[str, bool]:
+    """Fetch table/column metadata with limits to avoid LLM token overflow.
+
+    Returns: (schema_string, was_truncated)
+    """
     try:
-        query = f"""
-        SELECT 
-            table_name,
-            column_name,
-            data_type
-        FROM {database}.INFORMATION_SCHEMA.COLUMNS
-        WHERE table_schema = '{schema}'
-        ORDER BY table_name, ordinal_position
+        # 1) Pick top N tables by row_count (fall back to alphabetical)
+        top_tables_sql = f"""
+        with top_tables as (
+          select table_name
+          from {database}.information_schema.tables
+          where table_schema = '{schema}' and table_type in ('BASE TABLE','VIEW')
+          order by coalesce(row_count, 0) desc, table_name
+          limit {max_tables}
+        )
+        select c.table_name, c.column_name, c.data_type, c.ordinal_position
+        from {database}.information_schema.columns c
+        join top_tables t
+          on c.table_name = t.table_name
+        where c.table_schema = '{schema}'
+        order by c.table_name, c.ordinal_position
         """
-        result = session.sql(query).collect()
-        
-        # Group columns by table
-        tables_info = {}
-        for row in result:
-            table_name = row['TABLE_NAME']
-            if table_name not in tables_info:
-                tables_info[table_name] = []
-            tables_info[table_name].append(f"{row['COLUMN_NAME']} ({row['DATA_TYPE']})")
-        
-        # Format as readable string
-        schema_info = []
-        for table, columns in tables_info.items():
-            schema_info.append(f"Table: {table}, Columns: {', '.join(columns)}")
-        
-        return "; ".join(schema_info)
+        rows = session.sql(top_tables_sql).collect()
+
+        # Group columns by table and enforce per-table column limit
+        table_to_columns = {}
+        for r in rows:
+            t = r['TABLE_NAME']
+            if t not in table_to_columns:
+                table_to_columns[t] = []
+            if len(table_to_columns[t]) < max_columns_per_table:
+                table_to_columns[t].append(f"{r['COLUMN_NAME']} ({r['DATA_TYPE']})")
+
+        # Build schema string
+        parts = []
+        for table_name, cols in table_to_columns.items():
+            parts.append(f"Table: {table_name}, Columns: {', '.join(cols)}")
+
+        schema_str = "; ".join(parts)
+
+        # Hard cap to avoid model token overflow
+        truncated = False
+        if len(schema_str) > max_chars:
+            schema_str = schema_str[: max_chars].rsplit(' ', 1)[0] + " ... [TRUNCATED]"
+            truncated = True
+
+        return schema_str, truncated
     except Exception as e:
         st.error(f"Error fetching schema metadata: {str(e)}")
-        return ""
+        return "", False
 
-def generate_sql_with_cortex(session, schema_metadata: str, user_question: str, database: str, schema: str) -> Optional[str]:
+def generate_sql_with_cortex(session, schema_metadata: str, user_question: str, database: str, schema: str, schema_truncated: bool = False) -> Optional[str]:
     """Generate SQL using Snowflake Cortex AI."""
     try:
         system_prompt = "You are an expert Snowflake SQL data analyst. Your task is to write a single, clean, and efficient SQL query to answer the user's question based on the provided schema."
         
+        truncation_note = "\nNote: The schema context was truncated for brevity. Focus only on referenced tables/columns.\n" if schema_truncated else ""
+
         user_prompt = f"""
 Here is the schema for the database {database}.{schema}:
 ---
@@ -108,6 +136,7 @@ Important guidelines:
 - Use fully qualified table names (database.schema.table_name)
 - The query should be ready to run as-is
 - Focus on answering the specific business question asked
+{truncation_note}
 """
 
         # Construct the Cortex query - escape single quotes properly
@@ -203,6 +232,23 @@ def main():
         selected_schema = st.selectbox("Select Schema", schemas)
         
         st.success(f"Connected to: {selected_database}.{selected_schema}")
+
+        # Advanced controls for prompt size limits
+        with st.expander("Advanced (Prompt Size Limits)", expanded=False):
+            max_tables = st.number_input(
+                "Max tables to include in schema context",
+                min_value=5,
+                max_value=200,
+                value=20,
+                step=1
+            )
+            max_columns_per_table = st.number_input(
+                "Max columns per table",
+                min_value=5,
+                max_value=200,
+                value=12,
+                step=1
+            )
     
     # Main content area
     col1, col2 = st.columns([2, 1])
@@ -224,7 +270,9 @@ def main():
                 return
                 
             with st.spinner("Fetching schema metadata..."):
-                schema_metadata = get_schema_metadata(session, selected_database, selected_schema)
+                schema_metadata, schema_truncated = get_schema_metadata(
+                    session, selected_database, selected_schema, max_tables, max_columns_per_table
+                )
                 
             if not schema_metadata:
                 st.error("Could not fetch schema metadata. Please check your database and schema selection.")
@@ -232,7 +280,7 @@ def main():
                 
             with st.spinner("Generating SQL with Cortex AI..."):
                 generated_sql = generate_sql_with_cortex(
-                    session, schema_metadata, user_question, selected_database, selected_schema
+                    session, schema_metadata, user_question, selected_database, selected_schema, schema_truncated
                 )
             
             if generated_sql:
@@ -244,7 +292,9 @@ def main():
         st.header("📊 Schema Info")
         if selected_database and selected_schema:
             with st.expander("View Schema Metadata", expanded=False):
-                schema_info = get_schema_metadata(session, selected_database, selected_schema)
+                schema_info, _schema_trunc = get_schema_metadata(
+                    session, selected_database, selected_schema, max_tables, max_columns_per_table
+                )
                 if schema_info:
                     # Format for better display
                     tables = schema_info.split("; ")
