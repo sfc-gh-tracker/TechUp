@@ -173,6 +173,18 @@ Important guidelines:
         st.error(f"Error generating SQL with Cortex: {str(e)}")
         return None
 
+def build_preview_sql(sql_text: str) -> str:
+    """Wrap the generated SQL to safely preview the first 3 rows."""
+    s = (sql_text or "").strip()
+    if s.endswith(";"):
+        s = s[:-1]
+    return f"""
+with __q as (
+{s}
+)
+select * from __q limit 3
+"""
+
 def insert_into_pipeline_factory(session, pipeline_id: str, source_table: str, sql_snippet: str, 
                                 target_dt_name: str, lag_minutes: int, warehouse: str) -> bool:
     """Insert the generated SQL into the PIPELINE_CONFIG table."""
@@ -307,6 +319,23 @@ def main():
         st.header("🎯 Generated SQL Query")
         st.code(st.session_state['generated_sql'], language='sql')
         
+        # Preview results
+        st.header("🔎 Preview Results")
+        if st.button("Run Preview (Top 3 rows)", use_container_width=True):
+            try:
+                preview_sql = build_preview_sql(st.session_state['generated_sql'])
+                with st.spinner("Running preview query..."):
+                    preview_df = session.sql(preview_sql).to_pandas()
+                st.caption("Showing up to 3 rows")
+                st.dataframe(preview_df, use_container_width=True)
+                st.session_state['preview_df'] = preview_df
+            except Exception as e:
+                st.error(f"Error running preview: {str(e)}")
+
+        if 'preview_df' in st.session_state:
+            with st.expander("Last preview results", expanded=False):
+                st.dataframe(st.session_state['preview_df'], use_container_width=True)
+
         # Pipeline Factory Integration
         st.header("🏭 Add to Pipeline Factory")
         
