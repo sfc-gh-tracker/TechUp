@@ -348,6 +348,11 @@ def main():
                 schema_metadata, schema_truncated = get_schema_metadata(
                     session, selected_database, selected_schema, max_tables, max_columns_per_table
                 )
+                # Persist for use after rerun
+                st.session_state['schema_metadata'] = schema_metadata
+                st.session_state['schema_truncated'] = schema_truncated
+                st.session_state['selected_database'] = selected_database
+                st.session_state['selected_schema'] = selected_schema
                 
             if not schema_metadata:
                 st.error("Could not fetch schema metadata. Please check your database and schema selection.")
@@ -390,6 +395,16 @@ def main():
         validation_messages: List[str] = []
         preview_df = None
         max_retries = 5
+
+        # Ensure schema metadata is available across reruns
+        schema_metadata = st.session_state.get('schema_metadata')
+        schema_truncated = st.session_state.get('schema_truncated', False)
+        if not schema_metadata:
+            schema_metadata, schema_truncated = get_schema_metadata(
+                session, selected_database, selected_schema, max_tables, max_columns_per_table
+            )
+            st.session_state['schema_metadata'] = schema_metadata
+            st.session_state['schema_truncated'] = schema_truncated
 
         # Precompute schema catalog for basic validation on failure
         schema_catalog = get_schema_catalog(session, selected_database, selected_schema)
