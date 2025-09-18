@@ -408,6 +408,7 @@ def find_missing_columns(sql_text: str, schema_catalog: Dict[str, set]) -> List[
         if matched_table is None:
             missing.append(f"{base}.{col}")
             continue
+        # Validate columns on joins and predicates as well (we extract all qualifier.column pairs)
         if col_u not in {c.upper() for c in schema_catalog[matched_table]}:
             missing.append(f"{base}.{col}")
     # de-duplicate
@@ -523,20 +524,47 @@ def is_id_like(col: str) -> bool:
     cu = col.upper()
     return cu == 'ID' or cu.endswith('_ID') or cu.endswith('ID') or cu.endswith('_KEY')
 
+# Preferred join keys between known table pairs (simple names, case-insensitive)
+# Example: DT_DRIVERS <-> DT_DRIVER_PERFORMANCE should join on DriverID
+PREFERRED_JOIN_KEYS: Dict[Tuple[str, str], str] = {
+    ("DT_DRIVERS", "DT_DRIVER_PERFORMANCE"): "DriverID",
+    ("DT_DRIVER_PERFORMANCE", "DT_DRIVERS"): "DriverID",
+}
+
+def lookup_preferred_join_key(table_a: str, table_b: str, catalog: Dict[str, set]) -> Optional[str]:
+    a_u = table_a.upper()
+    b_u = table_b.upper()
+    pref = PREFERRED_JOIN_KEYS.get((a_u, b_u))
+    if not pref:
+        return None
+    # Ensure both tables actually have the column (case-insensitive)
+    cols_a = {c.upper(): c for c in catalog.get(table_a, set())}
+    cols_b = {c.upper(): c for c in catalog.get(table_b, set())}
+    pref_u = pref.upper()
+    if pref_u in cols_a and pref_u in cols_b:
+        # Return the preferred casing (from A or provided)
+        return cols_a.get(pref_u, pref)
+    return None
+
 def choose_best_join_key(table_a: str, table_b: str, catalog: Dict[str, set]) -> Optional[str]:
     """Pick a reasonable join column name shared by both tables, preferring *_ID/ID/_KEY."""
-    cols_a = {c.upper() for c in catalog.get(table_a, set())}
-    cols_b = {c.upper() for c in catalog.get(table_b, set())}
-    common = [c for c in cols_a.intersection(cols_b)]
+    # 1) Preferred mapping first
+    preferred = lookup_preferred_join_key(table_a, table_b, catalog)
+    if preferred:
+        return preferred
+    # 2) Otherwise find any common columns
+    cols_a = {c.upper(): c for c in catalog.get(table_a, set())}
+    cols_b = {c.upper(): c for c in catalog.get(table_b, set())}
+    common = [u for u in cols_a.keys() if u in cols_b]
     if not common:
         return None
     # Prefer id-like
-    id_like = [c for c in common if is_id_like(c)]
+    id_like = [u for u in common if is_id_like(u)]
     if id_like:
-        # if multiple, pick the one with table token hint if available
-        return id_like[0]
+        # Return original casing from table A
+        return cols_a[id_like[0]]
     # fallback to first common column
-    return common[0]
+    return cols_a[common[0]]
 
 def suggest_join_instructions(missing_table: str, present_tables: List[str], catalog: Dict[str, set]) -> Optional[str]:
     """Suggest a JOIN instruction string for LLM given missing table and present ones."""
