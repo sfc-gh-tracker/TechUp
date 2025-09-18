@@ -35,7 +35,7 @@ st.set_page_config(
 )
 
 # App version - bump this on each update
-VERSION = "1.1"
+VERSION = "1.2"
 
 def render_version_badge() -> None:
     badge_css = """
@@ -142,7 +142,7 @@ def get_schema_metadata(
         st.error(f"Error fetching schema metadata: {str(e)}")
         return "", False
 
-def generate_sql_with_cortex(session, schema_metadata: str, user_question: str, database: str, schema: str, schema_truncated: bool = False, additional_instructions: str = "") -> Optional[str]:
+def generate_sql_with_cortex(session, schema_metadata: str, user_question: str, database: str, schema: str, schema_truncated: bool = False, additional_instructions: str = "", model_name: str = 'snowflake-arctic') -> Optional[str]:
     """Generate SQL using Snowflake Cortex AI."""
     try:
         system_prompt = "You are an expert Snowflake SQL data analyst. Your task is to write a single, clean, and efficient SQL query to answer the user's question based on the provided schema."
@@ -171,7 +171,7 @@ Important guidelines:
         
         cortex_query = f"""
         SELECT SNOWFLAKE.CORTEX.COMPLETE(
-            'snowflake-arctic',
+            '{model_name}',
             CONCAT(
                 '<s>[INST]',
                 '{system_prompt_escaped}',
@@ -206,13 +206,26 @@ def validate_sql_with_cortex(
     candidate_sql: str,
     database: str,
     schema: str,
-    error_context: str = ""
+    error_context: str = "",
+    model_name: str = 'snowflake-arctic'
 ) -> Optional[str]:
     """Ask Cortex to validate/fix SQL using schema metadata and a table->columns map.
     Returns corrected SQL or None.
     """
     try:
-        catalog_json = json.dumps({t: sorted(list(cols)) for t, cols in schema_catalog.items()})
+        # Build a compact catalog focused on relevant tables to reduce token usage
+        referenced = [t.split('.')[-1].replace('"', '') for t in extract_referenced_tables(candidate_sql)]
+        ob_quals = [q.replace('"', '') for q, _c in extract_order_by_qualified_pairs(candidate_sql)]
+        relevant = set([t.upper() for t in referenced + ob_quals])
+        compact_catalog: Dict[str, List[str]] = {}
+        for t, cols in schema_catalog.items():
+            if t.upper() in relevant:
+                compact_catalog[t] = sorted(list(cols))[:50]
+        if not compact_catalog:
+            # Fallback: first 10 tables alphabetically
+            for t in sorted(schema_catalog.keys())[:10]:
+                compact_catalog[t] = sorted(list(schema_catalog[t]))[:30]
+        catalog_json = json.dumps(compact_catalog)
         system_prompt = (
             "You are a Snowflake SQL validator and fixer. Given a schema and a candidate SQL, "
             "return a single corrected SQL statement that strictly uses only existing tables/columns, "
@@ -251,7 +264,7 @@ Rules:
 
         cortex_query = f"""
         SELECT SNOWFLAKE.CORTEX.COMPLETE(
-            'snowflake-arctic',
+            '{model_name}',
             CONCAT(
                 '<s>[INST]',
                 '{system_prompt_escaped}',
@@ -717,6 +730,7 @@ def main():
         for attempt in range(1, max_retries + 1):
             try:
                 # First ask the model to validate/fix the candidate SQL using schema metadata and catalog
+                # Try primary model first
                 validated = validate_sql_with_cortex(
                     session,
                     schema_metadata,
@@ -724,11 +738,27 @@ def main():
                     st.session_state['generated_sql'],
                     selected_database,
                     selected_schema,
-                    ""
+                    "",
+                    'snowflake-arctic'
                 )
                 if validated:
                     validated = qualify_sql(validated, selected_database, selected_schema)
                     st.session_state['generated_sql'] = validated
+                else:
+                    # Fallback to a lighter model to avoid token limit issues
+                    validated_alt = validate_sql_with_cortex(
+                        session,
+                        schema_metadata,
+                        schema_catalog,
+                        st.session_state['generated_sql'],
+                        selected_database,
+                        selected_schema,
+                        "",
+                        'mistral-large'
+                    )
+                    if validated_alt:
+                        validated_alt = qualify_sql(validated_alt, selected_database, selected_schema)
+                        st.session_state['generated_sql'] = validated_alt
 
                 preview_sql = build_preview_sql(st.session_state['generated_sql'])
                 with st.spinner(f"Running preview (attempt {attempt}/{max_retries})..."):
@@ -739,7 +769,7 @@ def main():
                 else:
                     # No rows; ask LLM to regenerate with instruction to ensure rows
                     validation_messages.append("No rows returned; retrying with stronger constraints.")
-                    addl = "Ensure the query returns at least a few rows based on available data. Avoid referencing non-existent columns."
+                    addl = "Ensure the query returns at least a few rows based on available data. Avoid referencing non-existent columns. Add necessary JOINs if ORDER BY/SELECT columns come from different tables."
                     regenerated = generate_sql_with_cortex(
                         session,
                         schema_metadata,
@@ -747,13 +777,29 @@ def main():
                         selected_database,
                         selected_schema,
                         False,
-                        addl
+                        addl,
+                        'snowflake-arctic'
                     )
                     if regenerated:
                         regenerated = qualify_sql(regenerated, selected_database, selected_schema)
                         st.session_state['generated_sql'] = regenerated
                     else:
-                        last_error = "Regeneration failed"
+                        # fallback model
+                        regenerated_alt = generate_sql_with_cortex(
+                            session,
+                            schema_metadata,
+                            st.session_state['user_question'],
+                            selected_database,
+                            selected_schema,
+                            False,
+                            addl,
+                            'mistral-large'
+                        )
+                        if regenerated_alt:
+                            regenerated_alt = qualify_sql(regenerated_alt, selected_database, selected_schema)
+                            st.session_state['generated_sql'] = regenerated_alt
+                        else:
+                            last_error = "Regeneration failed"
             except Exception as e:
                 last_error = str(e)
                 # Attempt to detect invalid identifiers and guide a regeneration
@@ -799,12 +845,28 @@ def main():
                     st.session_state['generated_sql'] + "\n-- Fix per errors above",
                     selected_database,
                     selected_schema,
-                    addl
+                    addl,
+                    'snowflake-arctic'
                 )
                 if regenerated:
                     regenerated = qualify_sql(regenerated, selected_database, selected_schema)
                     st.session_state['generated_sql'] = regenerated
                 else:
+                    # Fallback model for regeneration
+                    regenerated_alt = validate_sql_with_cortex(
+                        session,
+                        schema_metadata,
+                        schema_catalog,
+                        st.session_state['generated_sql'] + "\n-- Fix per errors above",
+                        selected_database,
+                        selected_schema,
+                        addl,
+                        'mistral-large'
+                    )
+                    if regenerated_alt:
+                        regenerated_alt = qualify_sql(regenerated_alt, selected_database, selected_schema)
+                        st.session_state['generated_sql'] = regenerated_alt
+                    else:
                     validation_messages.append("Regeneration failed after error: " + last_error)
 
         if preview_df is not None:
