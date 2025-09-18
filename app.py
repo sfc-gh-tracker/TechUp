@@ -34,6 +34,30 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# App version - bump this on each update
+VERSION = "1.1"
+
+def render_version_badge() -> None:
+    badge_css = """
+    <style>
+    .version-badge {
+        position: fixed;
+        top: 8px;
+        right: 12px;
+        background: #f0f2f6;
+        color: #343a40;
+        border: 1px solid #e0e0e0;
+        border-radius: 12px;
+        padding: 2px 10px;
+        font-size: 12px;
+        font-weight: 600;
+        z-index: 1000;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
+    </style>
+    """
+    st.markdown(badge_css + f"<div class=\"version-badge\">v {VERSION}</div>", unsafe_allow_html=True)
+
 def get_snowflake_session():
     """Get the active Snowflake session for Snowflake Streamlit apps."""
     try:
@@ -558,6 +582,7 @@ def insert_into_pipeline_factory(session, pipeline_id: str, source_table: str, s
 def main():
     st.title("🔍 Natural Language to SQL Pipeline Generator")
     st.markdown("Transform your business questions into SQL queries and add them to the pipeline factory.")
+    render_version_badge()
     
     # Initialize Snowflake session
     session = get_snowflake_session()
