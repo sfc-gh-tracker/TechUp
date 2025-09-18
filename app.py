@@ -35,7 +35,7 @@ st.set_page_config(
 )
 
 # App version - bump this on each update
-VERSION = "1.4"
+VERSION = "1.5"
 
 def render_version_badge() -> None:
     badge_css = """
@@ -814,175 +814,75 @@ def main():
         # Precompute schema catalog for basic validation on failure
         schema_catalog = get_schema_catalog(session, selected_database, selected_schema)
 
-        # Try to preview up to N times, validating columns before execution
+        # New 3-step flow to reduce hangs: run → repair → validate (one pass with fallback)
         last_error = ""
-        for attempt in range(1, max_retries + 1):
+        try:
+            preview_sql = build_preview_sql(st.session_state['generated_sql'])
+            with st.spinner("Running preview (initial)..."):
+                df = session.sql(preview_sql).to_pandas()
+            if df is not None and len(df.index) > 0:
+                preview_df = df
+            else:
+                validation_messages.append("No rows from initial run; attempting heuristic repair.")
+        except Exception as e:
+            last_error = str(e)
+            validation_messages.append("Initial run error; attempting heuristic repair.")
+
+        if preview_df is None:
+            repaired = auto_repair_missing_orderby_join(
+                st.session_state['generated_sql'],
+                selected_database,
+                selected_schema,
+                schema_catalog
+            )
+            if repaired:
+                st.session_state['generated_sql'] = repaired
+                if debug_mode:
+                    validation_messages.append("Applied heuristic auto-join repair.")
             try:
-                # First ask the model to validate/fix the candidate SQL using schema metadata and catalog
-                # Try primary model first
-                primary_model = default_model
-                fallback_model = 'snowflake-arctic' if primary_model == 'mistral-large' else 'mistral-large'
-                validated = validate_sql_with_cortex(
-                    session,
-                    schema_metadata,
-                    schema_catalog,
-                    st.session_state['generated_sql'],
-                    selected_database,
-                    selected_schema,
-                    "",
-                    primary_model
-                )
-                if validated and validated.strip():
-                    validated = qualify_sql(validated, selected_database, selected_schema)
-                    st.session_state['generated_sql'] = validated
-                    if debug_mode:
-                        validation_messages.append(f"Model ({primary_model}) validated SQL.")
-                else:
-                    # Fallback to a lighter model to avoid token limit issues
-                    validated_alt = validate_sql_with_cortex(
-                        session,
-                        schema_metadata,
-                        schema_catalog,
-                        st.session_state['generated_sql'],
-                        selected_database,
-                        selected_schema,
-                        "",
-                        fallback_model
-                    )
-                    if validated_alt and validated_alt.strip():
-                        validated_alt = qualify_sql(validated_alt, selected_database, selected_schema)
-                        st.session_state['generated_sql'] = validated_alt
-                        if debug_mode:
-                            validation_messages.append(f"Model ({fallback_model}) validated SQL.")
-
-                # Attempt heuristic auto-repair for missing ORDER BY qualifier JOINs
-                repaired = auto_repair_missing_orderby_join(
-                    st.session_state['generated_sql'],
-                    selected_database,
-                    selected_schema,
-                    schema_catalog
-                )
-                if repaired:
-                    st.session_state['generated_sql'] = repaired
-                    if debug_mode:
-                        validation_messages.append("Applied heuristic auto-join repair.")
-
                 preview_sql = build_preview_sql(st.session_state['generated_sql'])
-                with st.spinner(f"Running preview (attempt {attempt}/{max_retries})..."):
+                with st.spinner("Running preview (after repair)..."):
                     df = session.sql(preview_sql).to_pandas()
                 if df is not None and len(df.index) > 0:
                     preview_df = df
-                    break
-                else:
-                    # No rows; ask LLM to regenerate with instruction to ensure rows
-                    validation_messages.append("No rows returned; retrying with stronger constraints.")
-                    addl = "Ensure the query returns at least a few rows based on available data. Avoid referencing non-existent columns. Add necessary JOINs if ORDER BY/SELECT columns come from different tables."
-                    regenerated = generate_sql_with_cortex(
-                        session,
-                        schema_metadata,
-                        st.session_state['user_question'],
-                        selected_database,
-                        selected_schema,
-                        False,
-                        addl,
-                        primary_model
-                    )
-                    if regenerated and regenerated.strip():
-                        regenerated = qualify_sql(regenerated, selected_database, selected_schema)
-                        st.session_state['generated_sql'] = regenerated
-                        if debug_mode:
-                            validation_messages.append(f"Regenerated SQL with {primary_model} after no-rows.")
-                    else:
-                        # fallback model
-                        regenerated_alt = generate_sql_with_cortex(
-                            session,
-                            schema_metadata,
-                            st.session_state['user_question'],
-                            selected_database,
-                            selected_schema,
-                            False,
-                            addl,
-                            fallback_model
-                        )
-                        if regenerated_alt and regenerated_alt.strip():
-                            regenerated_alt = qualify_sql(regenerated_alt, selected_database, selected_schema)
-                            st.session_state['generated_sql'] = regenerated_alt
-                            if debug_mode:
-                                validation_messages.append(f"Regenerated SQL with {fallback_model} after no-rows.")
-                        else:
-                            last_error = "Regeneration failed"
             except Exception as e:
                 last_error = str(e)
-                # Attempt to detect invalid identifiers and guide a regeneration
-                referenced = extract_referenced_tables(st.session_state['generated_sql'])
-                missing_targets = []
-                for ident in referenced:
-                    # Consider only last part as table when fully qualified
-                    table_simple = ident.split('.')[-1].replace('"', '')
-                    if table_simple not in schema_catalog:
-                        missing_targets.append(ident)
-                # If ORDER BY references a qualifier not in FROM/JOIN, suggest JOIN
-                invalid_order_qualifiers = find_order_by_qualifiers_not_in_from(
-                    st.session_state['generated_sql']
-                )
-                join_hints: List[str] = []
-                if invalid_order_qualifiers:
-                    present = get_present_base_tables(st.session_state['generated_sql'])
-                    for missing_table in invalid_order_qualifiers:
-                        hint = suggest_join_instructions(missing_table, present, schema_catalog)
-                        if hint:
-                            join_hints.append(hint)
-                invalid_from_error = parse_invalid_identifier_from_error(last_error)
-                addl_parts = []
-                if missing_targets:
-                    addl_parts.append(
-                        "Do not reference these missing tables: " + ", ".join(missing_targets)
-                    )
-                if invalid_from_error:
-                    addl_parts.append(
-                        "Remove or replace this invalid identifier: " + ", ".join(invalid_from_error)
-                    )
-                if join_hints:
-                    addl_parts.append("Add necessary JOINs based on schema relationships:")
-                    for j in join_hints:
-                        addl_parts.append("- " + j)
-                addl_parts.append("Use only tables and columns present in the provided schema context.")
-                addl_parts.append("If a column doesn't exist, choose appropriate alternatives to ensure the query runs.")
-                addl = "\n".join(addl_parts)
-                regenerated = validate_sql_with_cortex(
+
+        if preview_df is None:
+            # Single validation pass with fallback models
+            primary_model = default_model
+            fallback_model = 'snowflake-arctic' if primary_model == 'mistral-large' else 'mistral-large'
+            fixed = validate_sql_with_cortex(
+                session,
+                schema_metadata,
+                schema_catalog,
+                st.session_state['generated_sql'],
+                selected_database,
+                selected_schema,
+                last_error,
+                primary_model
+            )
+            if not fixed or not fixed.strip():
+                fixed = validate_sql_with_cortex(
                     session,
                     schema_metadata,
                     schema_catalog,
-                    st.session_state['generated_sql'] + "\n-- Fix per errors above",
+                    st.session_state['generated_sql'],
                     selected_database,
                     selected_schema,
-                    addl,
-                    primary_model
+                    last_error,
+                    fallback_model
                 )
-                if regenerated and regenerated.strip():
-                    regenerated = qualify_sql(regenerated, selected_database, selected_schema)
-                    st.session_state['generated_sql'] = regenerated
-                    if debug_mode:
-                        validation_messages.append(f"Validated & fixed SQL with {primary_model} after error.")
-                else:
-                    # Fallback model for regeneration
-                    regenerated_alt = validate_sql_with_cortex(
-                        session,
-                        schema_metadata,
-                        schema_catalog,
-                        st.session_state['generated_sql'] + "\n-- Fix per errors above",
-                        selected_database,
-                        selected_schema,
-                        addl,
-                        fallback_model
-                    )
-                    if regenerated_alt and regenerated_alt.strip():
-                        regenerated_alt = qualify_sql(regenerated_alt, selected_database, selected_schema)
-                        st.session_state['generated_sql'] = regenerated_alt
-                        if debug_mode:
-                            validation_messages.append(f"Validated & fixed SQL with {fallback_model} after error.")
-                    else:
-                        validation_messages.append("Regeneration failed after error: " + last_error)
+            if fixed and fixed.strip():
+                st.session_state['generated_sql'] = qualify_sql(fixed, selected_database, selected_schema)
+                try:
+                    preview_sql = build_preview_sql(st.session_state['generated_sql'])
+                    with st.spinner("Running preview (after validation)..."):
+                        df = session.sql(preview_sql).to_pandas()
+                    if df is not None and len(df.index) > 0:
+                        preview_df = df
+                except Exception as e:
+                    last_error = str(e)
 
         if preview_df is not None:
             st.caption("Showing up to 3 rows")
