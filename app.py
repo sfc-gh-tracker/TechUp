@@ -3,6 +3,7 @@ from typing import List
 from snowflake.snowpark import Session
 from snowflake.snowpark.context import get_active_session
 import re
+import pandas as pd
 
 # Inline config (replaces external config.py)
 DEFAULT_WAREHOUSE = "PIPELINE_WH"
@@ -96,21 +97,21 @@ def enforce_read_only(sql_text: str) -> bool:
 
 def preview_query(session: Session, sql_text: str, limit: int = PREVIEW_LIMIT):
     clean = normalize_sql_for_validation(sql_text)
-    # Primary: no casting, avoid referencing duplicate column names
-    preview_sql = f"select * from ({clean}) t limit {limit}"
-    try:
-        return session.sql(preview_sql).to_pandas()
-    except Exception:
-        # Fallback: return JSON rows to bypass conversion/dup-name issues
-        json_sql = f"select to_json(object_construct_keep_null(*)) as ROW_JSON from ({clean}) t limit {limit}"
-        try:
-            return session.sql(json_sql).to_pandas()
-        except Exception:
-            # Last resort: just collect small set of rows and stringify
-            rows = session.sql(f"select * from ({clean}) t limit {limit}").collect()
-            data = [{k: str(v) for k, v in r.items()} for r in rows]
-            import pandas as pd
-            return pd.DataFrame(data)
+    # Execute the exact SQL, only append a LIMIT for preview if not present
+    preview_sql = f"{clean} limit {limit}"
+    df = session.sql(preview_sql).to_pandas()
+    # Deduplicate column names for display while preserving order
+    seen = {}
+    new_cols = []
+    for c in df.columns:
+        if c in seen:
+            seen[c] += 1
+            new_cols.append(f"{c}_{seen[c]}")
+        else:
+            seen[c] = 0
+            new_cols.append(c)
+    df.columns = new_cols
+    return df
 
 def explain_query(session: Session, sql_text: str) -> str:
     clean = normalize_sql_for_validation(sql_text)
