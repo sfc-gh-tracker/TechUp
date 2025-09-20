@@ -16,6 +16,17 @@ FEW_SHOTS = [
 def get_session() -> Session:
     return get_active_session()
 
+def normalize_sql_for_validation(sql_text: str) -> str:
+    s = (sql_text or "").strip()
+    # Strip fenced code blocks like ```sql ... ```
+    s = re.sub(r"^```[a-zA-Z]*\s*", "", s)
+    s = re.sub(r"```\s*$", "", s)
+    s = s.strip()
+    # Allow a single trailing semicolon
+    if s.endswith(";"):
+        s = s[:-1]
+    return s.strip()
+
 def list_tables(session: Session, database: str, schema: str) -> List[str]:
     rows = session.sql(
         f"select table_name from {database}.information_schema.tables where table_schema = '{schema}' and table_type in ('BASE TABLE','VIEW') order by table_name"
@@ -64,12 +75,14 @@ def fetch_schema_card(session: Session, allowed_tables: List[str]) -> str:
     return "\n".join(lines)
 
 def is_single_select(sql_text: str) -> bool:
-    s = (sql_text or "").strip()
+    s = normalize_sql_for_validation(sql_text)
     if not s:
         return False
+    # Disallow any additional semicolons inside the text
     if ';' in s:
         return False
-    return s[:6].upper().startswith("SELECT") or s[:4].upper() == "WITH"
+    head = s.lstrip()[:6].upper()
+    return head.startswith("SELECT") or s.lstrip()[:4].upper() == "WITH"
 
 def enforce_read_only(sql_text: str) -> bool:
     s = " " + (sql_text or "").upper() + " "
@@ -81,10 +94,12 @@ def enforce_read_only(sql_text: str) -> bool:
     return not any(tok in s for tok in prohibited)
 
 def preview_query(session: Session, sql_text: str, limit: int = PREVIEW_LIMIT):
-    return session.sql(f"select * from ({sql_text}) limit {limit}").collect()
+    clean = normalize_sql_for_validation(sql_text)
+    return session.sql(f"select * from ({clean}) limit {limit}").collect()
 
 def explain_query(session: Session, sql_text: str) -> str:
-    rows = session.sql(f"EXPLAIN USING TEXT {sql_text}").collect()
+    clean = normalize_sql_for_validation(sql_text)
+    rows = session.sql(f"EXPLAIN USING TEXT {clean}").collect()
     out: List[str] = []
     for r in rows:
         try:
