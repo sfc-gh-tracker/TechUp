@@ -35,7 +35,7 @@ st.set_page_config(
 )
 
 # App version - bump this on each update
-VERSION = "1.5"
+VERSION = "1.6"
 PREVIEW_LIMIT = 3
 
 def render_version_badge() -> None:
@@ -83,6 +83,16 @@ def get_schemas(session, database: str) -> List[str]:
         return sorted([row['name'] for row in result])
     except Exception as e:
         st.error(f"Error fetching schemas: {str(e)}")
+        return []
+
+def list_tables(session, database: str, schema: str) -> List[str]:
+    try:
+        rows = session.sql(
+            f"select table_name from {database}.information_schema.tables where table_schema = '{schema}' and table_type in ('BASE TABLE','VIEW') order by table_name"
+        ).collect()
+        return [f"{database}.{schema}.{r['TABLE_NAME']}" for r in rows]
+    except Exception as e:
+        st.error(f"Error listing tables: {str(e)}")
         return []
 
 def get_schema_metadata(
@@ -805,13 +815,15 @@ def main():
         )
         user_question = (user_question or "").upper()
 
-        # Allowed tables (comma-separated)
+        # Allowed tables (multi-select)
         st.subheader("Scope (Allowed Tables)")
-        allowed_tables_input = st.text_input(
-            "Allowed tables (comma-separated, fully qualified DB.SCHEMA.TABLE)",
-            placeholder="RAW.SALES.ORDERS, RAW.CRM.CUSTOMERS"
+        available_tables = list_tables(session, selected_database, selected_schema)
+        allowed_tables = st.multiselect(
+            "Select one or more tables to ground the model",
+            options=available_tables,
+            default=[],
         )
-        allowed_tables = [t.strip().upper() for t in allowed_tables_input.split(",") if t.strip()]
+        allowed_tables = [t.upper() for t in allowed_tables]
 
         # Generate SQL button - Cortex scoped to allowed tables
         if st.button("🚀 Generate SQL with Cortex AI", type="primary", use_container_width=True):
