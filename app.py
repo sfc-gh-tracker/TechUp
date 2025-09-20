@@ -2,6 +2,7 @@ import streamlit as st
 from typing import List
 from snowflake.snowpark import Session
 from snowflake.snowpark.context import get_active_session
+import re
 
 # Inline config (replaces external config.py)
 DEFAULT_WAREHOUSE = "PIPELINE_WH"
