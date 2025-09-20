@@ -96,17 +96,21 @@ def enforce_read_only(sql_text: str) -> bool:
 
 def preview_query(session: Session, sql_text: str, limit: int = PREVIEW_LIMIT):
     clean = normalize_sql_for_validation(sql_text)
+    # Primary: no casting, avoid referencing duplicate column names
+    preview_sql = f"select * from ({clean}) t limit {limit}"
     try:
-        df0 = session.sql(f"select * from ({clean}) limit 0")
-        col_names = [f.name for f in df0.schema.fields]
-        if col_names:
-            cast_list = ", ".join([f'TO_VARCHAR("{c}") as "{c}"' for c in col_names])
-            preview_sql = f"select {cast_list} from ({clean}) limit {limit}"
-        else:
-            preview_sql = f"select * from ({clean}) limit {limit}"
+        return session.sql(preview_sql).to_pandas()
     except Exception:
-        preview_sql = f"select * from ({clean}) limit {limit}"
-    return session.sql(preview_sql).to_pandas()
+        # Fallback: return JSON rows to bypass conversion/dup-name issues
+        json_sql = f"select to_json(object_construct_keep_null(*)) as ROW_JSON from ({clean}) t limit {limit}"
+        try:
+            return session.sql(json_sql).to_pandas()
+        except Exception:
+            # Last resort: just collect small set of rows and stringify
+            rows = session.sql(f"select * from ({clean}) t limit {limit}").collect()
+            data = [{k: str(v) for k, v in r.items()} for r in rows]
+            import pandas as pd
+            return pd.DataFrame(data)
 
 def explain_query(session: Session, sql_text: str) -> str:
     clean = normalize_sql_for_validation(sql_text)
