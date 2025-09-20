@@ -1,18 +1,99 @@
 import streamlit as st
 from typing import List
 from snowflake.snowpark import Session
-from snowflake.snowpark.functions import call_function
-from snowflake_utils import (
-    get_session,
-    list_tables,
-    fetch_schema_card,
-    is_single_select,
-    enforce_read_only,
-    preview_query,
-    explain_query,
-    insert_pipeline_config,
-)
-from config import DEFAULT_WAREHOUSE, ALLOWED_TABLES, PREVIEW_LIMIT, CORTEX_MODEL, FEW_SHOTS
+from snowflake.snowpark.context import get_active_session
+
+# Inline config (replaces external config.py)
+DEFAULT_WAREHOUSE = "PIPELINE_WH"
+ALLOWED_TABLES: List[str] = []
+PREVIEW_LIMIT = 3
+CORTEX_MODEL = "mistral-large"
+FEW_SHOTS = [
+    "You are a Snowflake SQL assistant. Only output a single SELECT query. Use fully qualified identifiers. Do not include comments or extra text."
+]
+
+# Inline utils (replaces external snowflake_utils.py)
+def get_session() -> Session:
+    return get_active_session()
+
+def list_tables(session: Session, database: str, schema: str) -> List[str]:
+    rows = session.sql(
+        f"select table_name from {database}.information_schema.tables where table_schema = '{schema}' and table_type in ('BASE TABLE','VIEW') order by table_name"
+    ).collect()
+    return [f"{database}.{schema}.{r['TABLE_NAME']}" for r in rows]
+
+def fetch_schema_card(session: Session, allowed_tables: List[str]) -> str:
+    lines: List[str] = []
+    for full in allowed_tables:
+        parts = [p.strip() for p in full.split('.')]
+        if len(parts) != 3:
+            continue
+        db, sch, tbl = parts
+        cols = session.sql(
+            f"select column_name, data_type from {db}.information_schema.columns where table_schema = '{sch}' and table_name = '{tbl}' order by ordinal_position"
+        ).collect()
+        col_list = ", ".join([f"{c['COLUMN_NAME']}({c['DATA_TYPE']})" for c in cols])
+        lines.append(f"{db}.{sch}.{tbl}: {col_list}")
+    return "\n".join(lines)
+
+def is_single_select(sql_text: str) -> bool:
+    s = (sql_text or "").strip()
+    if not s:
+        return False
+    if ';' in s:
+        return False
+    return s[:6].upper().startswith("SELECT") or s[:4].upper() == "WITH"
+
+def enforce_read_only(sql_text: str) -> bool:
+    s = " " + (sql_text or "").upper() + " "
+    prohibited = [
+        " INSERT ", " UPDATE ", " DELETE ", " MERGE ", " TRUNCATE ",
+        " CREATE ", " ALTER ", " DROP ", " GRANT ", " REVOKE ",
+        " COPY ", " CALL ", " USE ", " SET "
+    ]
+    return not any(tok in s for tok in prohibited)
+
+def preview_query(session: Session, sql_text: str, limit: int = PREVIEW_LIMIT):
+    return session.sql(f"select * from ({sql_text}) limit {limit}").collect()
+
+def explain_query(session: Session, sql_text: str) -> str:
+    rows = session.sql(f"EXPLAIN USING TEXT {sql_text}").collect()
+    out: List[str] = []
+    for r in rows:
+        try:
+            out.append(str(list(r.values())[0]))
+        except Exception:
+            out.append(str(r))
+    return "\n".join(out)
+
+def insert_pipeline_config(
+    session: Session,
+    pipeline_id: str,
+    target_dt_name: str,
+    lag_minutes: int,
+    warehouse: str,
+    sql_select: str,
+    source_hint: str,
+):
+    # Insert minimal required fields; status starts as PENDING
+    insert_sql = f"""
+    INSERT INTO PIPELINE_CONFIG (
+        pipeline_id,
+        transformation_sql_snippet,
+        target_dt_name,
+        lag_minutes,
+        warehouse,
+        status
+    ) VALUES (
+        '{pipeline_id}',
+        $${sql_select}$$,
+        '{target_dt_name}',
+        {lag_minutes},
+        '{warehouse}',
+        'PENDING'
+    )
+    """
+    session.sql(insert_sql).collect()
 
 st.set_page_config(page_title="Pipeline Factory", layout="wide")
 
