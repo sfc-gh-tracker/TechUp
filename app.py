@@ -126,24 +126,20 @@ def explain_query(session: Session, sql_text: str) -> str:
 
 def insert_pipeline_config(
     session: Session,
-    pipeline_id: str,
     target_dt_name: str,
     lag_minutes: int,
     warehouse: str,
     sql_select: str,
-    source_hint: str,
 ):
     # Insert minimal required fields; status starts as PENDING
     insert_sql = f"""
     INSERT INTO PIPELINE_CONFIG (
-        pipeline_id,
         transformation_sql_snippet,
         target_dt_name,
         lag_minutes,
         warehouse,
         status
     ) VALUES (
-        '{pipeline_id}',
         $${sql_select}$$,
         '{target_dt_name}',
         {lag_minutes},
@@ -189,7 +185,6 @@ with st.expander("Scope & Options", expanded=True):
     default_wh = st.text_input("Warehouse", value=DEFAULT_WAREHOUSE).upper()
     target_dt_name = st.text_input("Target Dynamic Table name (DB.SCHEMA.NAME)").upper()
     lag_minutes = st.number_input("Lag (minutes)", min_value=1, max_value=1440, value=10)
-    pipeline_id = st.text_input("Pipeline ID", placeholder="ORDERS_COMPLETE_NLP").upper()
 
 st.subheader("Describe the data")
 prompt = st.text_area("Prompt", height=140, placeholder="Show the latest order per customer in the last 30 days")
@@ -255,20 +250,16 @@ if "generated_sql" in st.session_state:
     st.subheader("Create Pipeline")
     if not target_dt_name:
         st.info("Enter a target Dynamic Table name above.")
-    can_create = is_select and is_ro and explain_ok and preview_ok and bool(target_dt_name) and bool(pipeline_id)
+    can_create = is_select and is_ro and explain_ok and preview_ok and bool(target_dt_name)
 
     if st.button("Insert into PIPELINE_CONFIG (PENDING)", disabled=not can_create):
         try:
-            # Use first allowed table as source hint; the SP will use the full SELECT
-            source_hint = allowed_tables[0] if allowed_tables else "PUBLIC.DUAL"
             insert_pipeline_config(
                 session=session,
-                pipeline_id=pipeline_id,
                 target_dt_name=target_dt_name,
                 lag_minutes=int(lag_minutes),
                 warehouse=default_wh,
                 sql_select=sql_text,
-                source_hint=source_hint,
             )
             st.success("Inserted. The orchestrator will create the Dynamic Table shortly.")
         except Exception as e:
