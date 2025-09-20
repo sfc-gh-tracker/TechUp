@@ -22,6 +22,33 @@ def list_tables(session: Session, database: str, schema: str) -> List[str]:
     ).collect()
     return [f"{database}.{schema}.{r['TABLE_NAME']}" for r in rows]
 
+def get_databases(session: Session) -> List[str]:
+    try:
+        rows = session.sql("show databases").collect()
+        # Snowpark SHOW returns lower-case keys typically, but guard for both
+        names = []
+        for r in rows:
+            if 'name' in r:
+                names.append(r['name'])
+            elif 'NAME' in r:
+                names.append(r['NAME'])
+        return sorted(names)
+    except Exception:
+        return []
+
+def get_schemas(session: Session, database: str) -> List[str]:
+    try:
+        rows = session.sql(f"show schemas in database {database}").collect()
+        names = []
+        for r in rows:
+            if 'name' in r:
+                names.append(r['name'])
+            elif 'NAME' in r:
+                names.append(r['NAME'])
+        return sorted(names)
+    except Exception:
+        return []
+
 def fetch_schema_card(session: Session, allowed_tables: List[str]) -> str:
     lines: List[str] = []
     for full in allowed_tables:
@@ -108,35 +135,23 @@ st.title("Prompt → SQL → Dynamic Table")
 with st.expander("Scope & Options", expanded=True):
     st.caption("Choose tables to ground the model. Fewer tables = better accuracy.")
 
-    col_l, col_r = st.columns(2)
-    with col_l:
-        db_input = st.text_input("Database (optional)", placeholder="LOGISTICS_DW").strip().upper()
-    with col_r:
-        schema_input = st.text_input("Schema (optional)", placeholder="FLATTENED").strip().upper()
+    # Searchable dropdowns for Database and Schema
+    db_list = get_databases(session)
+    selected_db = st.selectbox("Database", options=db_list) if db_list else ""
+    schema_list = get_schemas(session, selected_db) if selected_db else []
+    selected_schema = st.selectbox("Schema", options=schema_list) if schema_list else ""
 
+    # Multiselect for allowed tables from the selected Database/Schema
     allowed_tables: List[str] = []
-    if db_input and schema_input:
-        try:
-            rows = session.sql(
-                f"select table_name from {db_input}.information_schema.tables where table_schema = '{schema_input}' and table_type in ('BASE TABLE','VIEW') order by table_name"
-            ).collect()
-            available = [f"{db_input}.{schema_input}.{r['TABLE_NAME']}" for r in rows]
-            allowed_tables = st.multiselect(
-                "Allowed tables (DB.SCHEMA.TABLE)",
-                options=available,
-                default=[],
-            )
-        except Exception as e:
-            st.error(f"Failed to list tables: {e}")
-            allowed_tables = []
-    else:
-        # Fallback: manual entry
-        allowed_tables_input = st.text_input(
-            "Allowed tables (comma-separated, fully qualified DB.SCHEMA.TABLE)",
-            value=", ".join(ALLOWED_TABLES) if ALLOWED_TABLES else "",
-            placeholder="RAW.SALES.ORDERS, RAW.CRM.CUSTOMERS",
+    if selected_db and selected_schema:
+        available = list_tables(session, selected_db, selected_schema)
+        allowed_tables = st.multiselect(
+            "Allowed tables (DB.SCHEMA.TABLE)",
+            options=available,
+            default=[],
         )
-        allowed_tables = [t.strip() for t in allowed_tables_input.split(",") if t.strip()]
+    else:
+        st.info("Select a Database and Schema to choose allowed tables.")
 
     allowed_tables = [t.upper() for t in allowed_tables]
 
