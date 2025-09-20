@@ -96,7 +96,17 @@ def enforce_read_only(sql_text: str) -> bool:
 
 def preview_query(session: Session, sql_text: str, limit: int = PREVIEW_LIMIT):
     clean = normalize_sql_for_validation(sql_text)
-    return session.sql(f"select * from ({clean}) limit {limit}").collect()
+    try:
+        df0 = session.sql(f"select * from ({clean}) limit 0")
+        col_names = [f.name for f in df0.schema.fields]
+        if col_names:
+            cast_list = ", ".join([f'TO_VARCHAR("{c}") as "{c}"' for c in col_names])
+            preview_sql = f"select {cast_list} from ({clean}) limit {limit}"
+        else:
+            preview_sql = f"select * from ({clean}) limit {limit}"
+    except Exception:
+        preview_sql = f"select * from ({clean}) limit {limit}"
+    return session.sql(preview_sql).to_pandas()
 
 def explain_query(session: Session, sql_text: str) -> str:
     clean = normalize_sql_for_validation(sql_text)
@@ -231,8 +241,8 @@ if "generated_sql" in st.session_state:
     preview_ok = False
     if is_select and is_ro and explain_ok:
         try:
-            rows = preview_query(session, sql_text, limit=PREVIEW_LIMIT)
-            st.dataframe([row.as_dict() for row in rows], use_container_width=True)
+            pdf = preview_query(session, sql_text, limit=PREVIEW_LIMIT)
+            st.dataframe(pdf, use_container_width=True)
             preview_ok = True
         except Exception as e:
             st.error(f"Preview failed: {e}")
