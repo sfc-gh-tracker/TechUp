@@ -36,6 +36,7 @@ st.set_page_config(
 
 # App version - bump this on each update
 VERSION = "1.5"
+PREVIEW_LIMIT = 3
 
 def render_version_badge() -> None:
     badge_css = """
@@ -327,6 +328,68 @@ def qualify_sql(sql_text: str, database: str, schema: str) -> str:
 def use_context(session, database: str, schema: str) -> None:
     # No-op placeholder; USE is not supported in some Streamlit contexts.
     return None
+
+# ---------------------- Simple validation/preview helpers (Cortex-driven flow) ----------------------
+
+def is_single_select(sql_text: str) -> bool:
+    s = (sql_text or "").strip()
+    if not s:
+        return False
+    if ";" in s:
+        return False
+    head = s[:6].upper()
+    return head.startswith("SELECT") or s[:4].upper() == "WITH"
+
+def enforce_read_only(sql_text: str) -> bool:
+    s = " " + (sql_text or "").upper() + " "
+    prohibited = [
+        " INSERT ", " UPDATE ", " DELETE ", " MERGE ", " TRUNCATE ",
+        " CREATE ", " ALTER ", " DROP ", " GRANT ", " REVOKE ",
+        " COPY ", " CALL ", " USE ", " SET "
+    ]
+    return not any(tok in s for tok in prohibited)
+
+def explain_query(session, sql_text: str) -> str:
+    rows = session.sql(f"EXPLAIN USING TEXT {sql_text}").collect()
+    # Join first column of each row which contains the text explain
+    plan_lines = []
+    for r in rows:
+        try:
+            plan_lines.append(str(list(r.values())[0]))
+        except Exception:
+            plan_lines.append(str(r))
+    return "\n".join(plan_lines)
+
+def preview_query(session, sql_text: str, limit: int = PREVIEW_LIMIT):
+    return session.sql(f"select * from ({sql_text}) limit {limit}").collect()
+
+def fetch_schema_card(session, allowed_tables: List[str]) -> str:
+    lines: List[str] = []
+    for full in allowed_tables:
+        parts = [p.strip() for p in full.split('.')]
+        if len(parts) != 3:
+            continue
+        db, sch, tbl = parts
+        cols = session.sql(
+            f"select column_name, data_type from {db}.information_schema.columns where table_schema = '{sch}' and table_name = '{tbl}' order by ordinal_position"
+        ).collect()
+        col_list = ", ".join([f"{c['COLUMN_NAME']}({c['DATA_TYPE']})" for c in cols])
+        lines.append(f"{db}.{sch}.{tbl}: {col_list}")
+    return "\n".join(lines)
+
+def cortex_generate_scoped_sql(session, model: str, allowed_tables_card: str, user_prompt: str) -> str:
+    system = "You are a Snowflake SQL assistant. Only output a single SELECT query. Use fully qualified identifiers. Do not include comments or extra text."
+    full_prompt = f"""
+You may only reference these tables and columns:
+{allowed_tables_card}
+
+User request:
+{user_prompt}
+"""
+    res = session.sql(
+        f"select snowflake.cortex.complete('{model}', $$ {system}\n\n{full_prompt} $$) as c"
+    ).collect()[0][0]
+    return (res or "").strip().strip('`')
 
 def get_schema_catalog(session, database: str, schema: str) -> Dict[str, set]:
     """Return mapping of table_name -> set(columns) for the selected db.schema."""
@@ -650,7 +713,6 @@ def insert_into_pipeline_factory(session, pipeline_id: str, source_table: str, s
         insert_query = f"""
         INSERT INTO PIPELINE_CONFIG (
             pipeline_id, 
-            source_table_name, 
             transformation_sql_snippet, 
             target_dt_name, 
             lag_minutes, 
@@ -658,7 +720,6 @@ def insert_into_pipeline_factory(session, pipeline_id: str, source_table: str, s
             status
         ) VALUES (
             '{pipeline_id}',
-            '{source_table}',
             $${sql_snippet}$$,
             '{target_dt_name}',
             {lag_minutes},
@@ -735,46 +796,49 @@ def main():
     
     with col1:
         st.header("📝 Ask Your Question")
-        
-        # User question input
+
+        # User question input (force uppercase)
         user_question = st.text_area(
             "What question do you want to answer from the data?",
-            placeholder="e.g., Show me the top 5 selling products in the last quarter",
+            placeholder="E.G., SHOW ME THE TOP 5 SELLING PRODUCTS IN THE LAST QUARTER",
             height=100
         )
-        
-        # Generate SQL button
+        user_question = (user_question or "").upper()
+
+        # Allowed tables (comma-separated)
+        st.subheader("Scope (Allowed Tables)")
+        allowed_tables_input = st.text_input(
+            "Allowed tables (comma-separated, fully qualified DB.SCHEMA.TABLE)",
+            placeholder="RAW.SALES.ORDERS, RAW.CRM.CUSTOMERS"
+        )
+        allowed_tables = [t.strip().upper() for t in allowed_tables_input.split(",") if t.strip()]
+
+        # Generate SQL button - Cortex scoped to allowed tables
         if st.button("🚀 Generate SQL with Cortex AI", type="primary", use_container_width=True):
             if not user_question.strip():
                 st.warning("Please enter a question first.")
                 return
-                
-            with st.spinner("Fetching schema metadata..."):
-                schema_metadata, schema_truncated = get_schema_metadata(
-                    session, selected_database, selected_schema, max_tables, max_columns_per_table
-                )
-                # Persist for use after rerun
-                st.session_state['schema_metadata'] = schema_metadata
-                st.session_state['schema_truncated'] = schema_truncated
+            if not allowed_tables:
+                st.warning("Please provide at least one allowed table.")
+                return
+
+            with st.spinner("Building schema card..."):
+                schema_card = fetch_schema_card(session, allowed_tables)
+                st.session_state['schema_metadata'] = schema_card
                 st.session_state['selected_database'] = selected_database
                 st.session_state['selected_schema'] = selected_schema
-                
-            if not schema_metadata:
-                st.error("Could not fetch schema metadata. Please check your database and schema selection.")
-                return
-                
-            with st.spinner("Generating SQL with Cortex AI..."):
-                generated_sql = generate_sql_with_cortex(
-                    session, schema_metadata, user_question, selected_database, selected_schema, schema_truncated
-                )
-                if generated_sql:
-                    # Best-effort fully qualify any unqualified identifiers
-                    generated_sql = qualify_sql(generated_sql, selected_database, selected_schema)
-            
+
+            with st.spinner("Generating SQL with Cortex (scoped)..."):
+                generated_sql = cortex_generate_scoped_sql(session, default_model, schema_card, user_question)
+                generated_sql = qualify_sql(generated_sql, selected_database, selected_schema)
+
             if generated_sql:
                 st.session_state['generated_sql'] = generated_sql
                 st.session_state['user_question'] = user_question
-                st.rerun()
+                st.session_state['allowed_tables'] = allowed_tables
+                st.success("SQL generated. Validate and preview below.")
+            else:
+                st.error("Cortex did not return a SQL statement.")
     
     with col2:
         st.header("📊 Schema Info")
@@ -805,11 +869,17 @@ def main():
         schema_metadata = st.session_state.get('schema_metadata')
         schema_truncated = st.session_state.get('schema_truncated', False)
         if not schema_metadata:
-            schema_metadata, schema_truncated = get_schema_metadata(
-                session, selected_database, selected_schema, max_tables, max_columns_per_table
-            )
-            st.session_state['schema_metadata'] = schema_metadata
-            st.session_state['schema_truncated'] = schema_truncated
+            # If not present from earlier step, derive from allowed tables if provided
+            allowed_tables = st.session_state.get('allowed_tables', [])
+            if allowed_tables:
+                schema_metadata = fetch_schema_card(session, allowed_tables)
+                st.session_state['schema_metadata'] = schema_metadata
+            else:
+                schema_metadata, schema_truncated = get_schema_metadata(
+                    session, selected_database, selected_schema, max_tables, max_columns_per_table
+                )
+                st.session_state['schema_metadata'] = schema_metadata
+                st.session_state['schema_truncated'] = schema_truncated
 
         # Precompute schema catalog for basic validation on failure
         schema_catalog = get_schema_catalog(session, selected_database, selected_schema)
@@ -912,21 +982,18 @@ def main():
         with col1:
             pipeline_id = st.text_input(
                 "Pipeline ID",
-                placeholder="e.g., top_products_q3_pipeline",
+                placeholder="E.G., TOP_PRODUCTS_Q3_PIPELINE",
                 help="Unique identifier for your pipeline"
-            )
+            ).upper()
             
-            source_table = st.text_input(
-                "Source Table Name",
-                placeholder="e.g., RAW.SALES.PRODUCTS",
-                help="Fully qualified source table name"
-            )
+            # Source table is optional/not needed now; remove field but keep backward compatibility
+            source_table = ""
             
             target_dt_name = st.text_input(
                 "Target Dynamic Table Name",
-                placeholder="e.g., ANALYTICS.STAGE.TOP_PRODUCTS_DT",
+                placeholder="E.G., ANALYTICS.STAGE.TOP_PRODUCTS_DT",
                 help="Fully qualified target dynamic table name"
-            )
+            ).upper()
         
         with col2:
             lag_minutes = st.number_input(
@@ -941,10 +1008,10 @@ def main():
                 "Warehouse",
                 value="PIPELINE_WH",
                 help="Warehouse to use for the dynamic table"
-            )
+            ).upper()
         
         if st.button("➕ Add to Pipeline Factory", type="primary", use_container_width=True):
-            if not all([pipeline_id, source_table, target_dt_name]):
+            if not all([pipeline_id, target_dt_name]):
                 st.warning("Please fill in all required fields.")
             else:
                 success = insert_into_pipeline_factory(
