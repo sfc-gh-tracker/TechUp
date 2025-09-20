@@ -52,14 +52,13 @@ def run(session: Session) -> str:
         lag_minutes = int(r[''LAG_MINUTES''])
         warehouse = r[''WAREHOUSE'']
 
-        q_db = quote_identifier(target_dt_database)
         q_target = quote_identifier(target_dt_name)
         q_wh = quote_identifier(warehouse)
 
         select_sql = build_select_sql(snippet)
 
         dt_sql = f"""
-create or replace dynamic table {q_db}..{q_target}
+create or replace dynamic table {q_target}
 warehouse = {q_wh}
 lag = ''{lag_minutes} minutes''
 as
@@ -68,11 +67,11 @@ as
         session.sql(dt_sql).collect()
 
         session.sql(
-            f"update PIPELINE_CONFIG set status = ''ACTIVE'' where target_dt_database = {quote_literal(target_dt_database)} and target_dt_name = {quote_literal(target_dt_name)}"
+            f"update PIPELINE_CONFIG set status = ''ACTIVE'' where target_dt_name = {quote_literal(target_dt_name)}"
         ).collect()
 
         created += 1
-        messages.append(f"{target_dt_database}..{target_dt_name}")
+        messages.append(f"{target_dt_name}")
 
     return f"Created/updated {created} dynamic table(s): " + ", ".join(messages)
 ';
