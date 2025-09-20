@@ -126,6 +126,7 @@ def explain_query(session: Session, sql_text: str) -> str:
 
 def insert_pipeline_config(
     session: Session,
+    target_dt_database: str,
     target_dt_name: str,
     lag_minutes: int,
     warehouse: str,
@@ -135,12 +136,14 @@ def insert_pipeline_config(
     insert_sql = f"""
     INSERT INTO PIPELINE_CONFIG (
         transformation_sql_snippet,
+        target_dt_database,
         target_dt_name,
         lag_minutes,
         warehouse,
         status
     ) VALUES (
         $${sql_select}$$,
+        '{target_dt_database}',
         '{target_dt_name}',
         {lag_minutes},
         '{warehouse}',
@@ -183,7 +186,8 @@ with st.expander("Scope & Options", expanded=True):
     allowed_tables = [t.upper() for t in allowed_tables]
 
     default_wh = st.text_input("Warehouse", value=DEFAULT_WAREHOUSE).upper()
-    target_dt_name = st.text_input("Target Dynamic Table name (DB.SCHEMA.NAME)").upper()
+    target_dt_database = st.text_input("Target Dynamic Table Database (DB ONLY)").upper()
+    target_dt_name = st.text_input("Target Dynamic Table Name (TABLE ONLY)").upper()
     lag_minutes = st.number_input("Lag (minutes)", min_value=1, max_value=1440, value=10)
 
 st.subheader("Describe the data")
@@ -248,14 +252,15 @@ if "generated_sql" in st.session_state:
             st.error(f"Preview failed: {e}")
 
     st.subheader("Create Pipeline")
-    if not target_dt_name:
-        st.info("Enter a target Dynamic Table name above.")
-    can_create = is_select and is_ro and explain_ok and preview_ok and bool(target_dt_name)
+    if not (target_dt_database and target_dt_name):
+        st.info("Enter the target Dynamic Table database and table name above.")
+    can_create = is_select and is_ro and explain_ok and preview_ok and bool(target_dt_database) and bool(target_dt_name)
 
     if st.button("Insert into PIPELINE_CONFIG (PENDING)", disabled=not can_create):
         try:
             insert_pipeline_config(
                 session=session,
+                target_dt_database=target_dt_database,
                 target_dt_name=target_dt_name,
                 lag_minutes=int(lag_minutes),
                 warehouse=default_wh,
