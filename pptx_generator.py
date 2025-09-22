@@ -9,20 +9,12 @@ slides_spec = [
         "folder": "Adaptive Right-Sizing",
         "title": "Adaptive Warehouse Right-Sizing",
         "bullets": [
-            "Goal: auto-tune warehouse size by observed load patterns",
-            "Inputs: staged WAREHOUSE_METERING (credits_used by hour)",
-            "Policy DT: RIGHT_SIZING_POLICY_DT → per-warehouse/hour recommendation",
-            "Executor: APPLY_RIGHT_SIZING() applies size + optional multi-cluster"
+            "Auto-rightsizes warehouses by hourly load",
+            "Policy DT derives size from credits_used",
+            "Executor task applies changes and logs"
         ],
-        "details_title": "How it works",
-        "details": [
-            "Ingestion: Task merges ACCOUNT_USAGE.WAREHOUSE_METERING → TECHUP.AUDIT.WAREHOUSE_METERING_STG (change tracking)",
-            "Signal: Aggregate credits_used into hourly buckets per warehouse",
-            "Policy logic: map avg(credits_used) ranges → SMALL/MEDIUM/LARGE sizing and multi-cluster toggle",
-            "Governance: all changes logged in RIGHT_SIZING_LOG with status, DDL, error",
-            "Orchestration: APPLY_RIGHT_SIZING_TASK executes on-the-hour against current hour recommendation",
-            "Safety: thresholds are conservative; tune sizing cutoffs per environment; dry-run by commenting execute immediate"
-        ],
+        "details_title": None,
+        "details": [],
     },
     {
         "folder": "Pipeline Factory",
