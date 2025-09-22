@@ -17,16 +17,17 @@ as
 $$
 declare
   c cursor for select object_name, proposed_ddl from QPO_PENDING_ACTIONS_DT where proposed_ddl is not null;
-  v_obj string; v_sql text; v_count number := 0;
+  v_obj string; v_sql text; v_err string; v_count number := 0;
 begin
   for rec in c do
     v_obj := rec.object_name; v_sql := rec.proposed_ddl;
     begin
-      execute immediate v_sql;
-      insert into QPO_ACTION_LOG(object_name, status, ddl) values(v_obj,'SUCCESS',v_sql);
+      execute immediate :v_sql;
+      insert into QPO_ACTION_LOG(object_name, status, ddl) values(:v_obj,'SUCCESS',:v_sql);
       v_count := v_count + 1;
     exception when other then
-      insert into QPO_ACTION_LOG(object_name, status, ddl, error) values(v_obj,'ERROR',v_sql,sqlerrm);
+      v_err := sqlerrm;
+      insert into QPO_ACTION_LOG(object_name, status, ddl, error) values(:v_obj,'ERROR',:v_sql,:v_err);
     end;
   end for;
   return 'Executed ' || v_count || ' optimizer action(s).';

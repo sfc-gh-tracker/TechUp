@@ -22,7 +22,7 @@ declare
     select warehouse_name, hour_bucket, recommended_size, recommend_multi_cluster
     from RIGHT_SIZING_POLICY_DT
     where date_trunc('hour', current_timestamp()) = hour_bucket;
-  v_wh string; v_hr timestamp_ltz; v_size string; v_mc number; v_sql text; v_count number := 0;
+  v_wh string; v_hr timestamp_ltz; v_size string; v_mc number; v_sql text; v_err string; v_count number := 0;
 begin
   for rec in c do
     v_wh := rec.warehouse_name; v_hr := rec.hour_bucket; v_size := rec.recommended_size; v_mc := rec.recommend_multi_cluster;
@@ -33,8 +33,9 @@ begin
       values(:v_wh, :v_hr, :v_size, :v_mc, 'SUCCESS', :v_sql);
       v_count := v_count + 1;
     exception when other then
+      v_err := sqlerrm;
       insert into RIGHT_SIZING_LOG(warehouse_name, hour_bucket, recommended_size, recommend_multi_cluster, status, ddl, error)
-      values(:v_wh, :v_hr, :v_size, :v_mc, 'ERROR', :v_sql, sqlerrm);
+      values(:v_wh, :v_hr, :v_size, :v_mc, 'ERROR', :v_sql, :v_err);
     end;
   end for;
   return 'Applied ' || v_count || ' right-sizing action(s).';

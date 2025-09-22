@@ -18,6 +18,7 @@ declare
   c cursor for
     select proposed_ddl from PENDING_DDL_ACTIONS_DT where proposed_ddl is not null;
   v_sql text;
+  v_err string;
   v_count number := 0;
 begin
   for rec in c do
@@ -28,7 +29,8 @@ begin
       v_count := v_count + 1;
     exception
       when other then
-        insert into ACTION_LOG(status, ddl, error) values('ERROR', :v_sql, sqlerrm);
+        v_err := sqlerrm;
+        insert into ACTION_LOG(status, ddl, error) values('ERROR', :v_sql, :v_err);
     end;
   end for;
   return 'Executed ' || v_count || ' action(s).';
