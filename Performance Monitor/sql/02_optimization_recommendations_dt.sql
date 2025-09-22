@@ -8,13 +8,12 @@ with perf as (
 ),
 storage as (
   select
-    database_name,
-    schema_name,
+    table_catalog as database_name,
+    table_schema as schema_name,
     table_name,
     active_bytes,
     time_travel_bytes,
-    failsafe_bytes,
-    clustering_key
+    failsafe_bytes
   from snowflake.account_usage.table_storage_metrics
 )
 select
@@ -31,9 +30,9 @@ select
     else 'Normal'
   end as issue_category,
   case
-    when perf.bytes_spilled > 10*1024*1024*1024 and (storage.clustering_key is null or storage.clustering_key = '') then
-      'Recommend defining a cluster key on most selective columns to reduce spillage.'
-    when perf.bytes_scanned > 100*1024*1024*1024 and (storage.clustering_key is null or storage.clustering_key = '') then
+    when perf.bytes_spilled > 10*1024*1024*1024 then
+      'Recommend defining a cluster key on selective columns to reduce spillage.'
+    when perf.bytes_scanned > 100*1024*1024*1024 then
       'Recommend adding a cluster key to improve pruning on large scans.'
     when perf.credits_used > 50 then
       'Recommend increasing warehouse size or enabling multi-cluster during peak hours.'
