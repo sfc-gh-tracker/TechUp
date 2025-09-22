@@ -13,11 +13,11 @@ with q as (
     start_time,
     end_time,
     total_elapsed_time,
-    total_bytes_scanned,
+    bytes_scanned as total_bytes_scanned,
     bytes_spilled_to_local_storage,
     bytes_spilled_to_remote_storage,
     rows_produced
-  from snowflake.account_usage.query_history
+  from TECHUP.QPO_AUDIT.QUERY_HISTORY_STG
   where start_time >= dateadd('hour', -24, current_timestamp())
 ),
 wm as (
@@ -29,7 +29,7 @@ wm as (
     avg_running,
     avg_queued_load,
     avg_queued_provisioning
-  from snowflake.account_usage.warehouse_metering_history
+  from TECHUP.AUDIT.WAREHOUSE_METERING_STG
   where start_time >= dateadd('hour', -24, current_timestamp())
 )
 select

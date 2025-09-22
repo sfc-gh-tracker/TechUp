@@ -6,7 +6,7 @@ as
 with wm as (
   select warehouse_name, date_trunc('hour', start_time) as hour_bucket,
          avg_running, avg_queued_load, avg_queued_provisioning
-  from snowflake.account_usage.warehouse_metering_history
+  from TECHUP.AUDIT.WAREHOUSE_METERING_STG
   where start_time >= dateadd('day', -7, current_timestamp())
 ), agg as (
   select warehouse_name, hour_bucket,
