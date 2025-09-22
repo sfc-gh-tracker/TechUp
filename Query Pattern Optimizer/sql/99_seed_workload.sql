@@ -5,7 +5,12 @@ select seq4() as id,
        uniform(1,50000,random()) as cust_id,
        to_date('2024-01-01') + uniform(0,365,random()) as order_date,
        uniform(1,1000,random())::number(10,2) as amount,
-       randstr(12,random()) as region
+       case uniform(0,4,random())
+         when 0 then 'NORTH'
+         when 1 then 'SOUTH'
+         when 2 then 'EAST'
+         else 'WEST'
+       end as region
 from table(generator(rowcount=>2e6));
 
 -- repeated predicate: region filter; join pattern on cust_id
