@@ -21,3 +21,46 @@ join TECHUP.RIGHTSIZE.DIM d on f.k = d.k
 where f.ts >= dateadd('hour', -1, current_timestamp());
 
 
+-- Procedure to run workload repeatedly with cache disabled
+create or replace procedure RIGHTSIZE_SEED_RUN()
+returns string
+language sql
+execute as owner
+as
+$$
+begin
+  alter session set use_cached_result = false;
+
+  -- Repeat heavy join 3x to amplify load
+  for i in 1..3 do
+    select count(*)
+    from TECHUP.RIGHTSIZE.FACT f
+    join TECHUP.RIGHTSIZE.DIM d on f.k = d.k
+    where f.ts >= dateadd('hour', -1, current_timestamp());
+  end for;
+
+  -- Additional aggregations to vary profile
+  select sum(v)
+  from TECHUP.RIGHTSIZE.FACT
+  where ts >= dateadd('hour', -1, current_timestamp());
+
+  select d.attr, count(*)
+  from TECHUP.RIGHTSIZE.FACT f
+  join TECHUP.RIGHTSIZE.DIM d on f.k = d.k
+  group by 1
+  order by 2 desc
+  limit 1000;
+
+  return 'RIGHTSIZE_SEED_RUN completed';
+end;
+$$;
+
+-- Hourly task to execute workload
+create or replace task RIGHTSIZE_SEED_TASK
+warehouse = PIPELINE_WH
+schedule = 'USING CRON 0 * * * * UTC'
+as call RIGHTSIZE_SEED_RUN();
+
+alter task RIGHTSIZE_SEED_TASK resume;
+
+
