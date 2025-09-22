@@ -152,7 +152,33 @@ def insert_pipeline_config(
     """
     session.sql(insert_sql).collect()
 
-st.set_page_config(page_title="Pipeline Factory", layout="wide")
+st.set_page_config(page_title="Pipeline Factory", page_icon="🧠", layout="wide")
+
+# Subtle UI theming
+st.markdown(
+    """
+    <style>
+    h1 {
+      background: linear-gradient(90deg, #00B4D8, #7B2FF7 60%, #F72585);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .stButton>button {
+      background: linear-gradient(90deg,#7B2FF7,#F72585);
+      color: #fff;
+      border: 0;
+      border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+    }
+    .stButton>button:hover { filter: brightness(0.95); }
+    div[data-testid="stExpander"] > div {
+      border-radius: 12px;
+      border: 1px solid rgba(0,0,0,0.08);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 @st.cache_resource(show_spinner=False)
 def _get_session() -> Session:
@@ -160,9 +186,9 @@ def _get_session() -> Session:
 
 session = _get_session()
 
-st.title("Prompt → SQL → Dynamic Table")
+st.title("🧠 Prompt → SQL → Dynamic Table")
 
-with st.expander("Scope & Options", expanded=True):
+with st.expander("🧭 Scope & Options", expanded=True):
     st.caption("Choose tables to ground the model. Fewer tables = better accuracy.")
 
     # Searchable dropdowns for Database and Schema
@@ -190,10 +216,10 @@ with st.expander("Scope & Options", expanded=True):
     target_dt_name = st.text_input("Target Dynamic Table Name (TABLE ONLY)").upper()
     lag_minutes = st.number_input("Lag (minutes)", min_value=1, max_value=1440, value=10)
 
-st.subheader("Describe the data")
+st.subheader("📝 Describe the data")
 prompt = st.text_area("Prompt", height=140, placeholder="Show the latest order per customer in the last 30 days")
 
-if st.button("Generate SQL with Cortex", type="primary"):
+if st.button("✨ Generate SQL with Cortex", type="primary"):
     if not allowed_tables:
         st.error("Please provide at least one allowed table.")
     elif not prompt.strip():
@@ -225,7 +251,7 @@ User request:
 if "generated_sql" in st.session_state:
     sql_text = st.session_state["generated_sql"]
 
-    st.subheader("Validation")
+    st.subheader("✅ Validation")
     col1, col2 = st.columns(2)
     with col1:
         is_select = is_single_select(sql_text)
@@ -241,7 +267,7 @@ if "generated_sql" in st.session_state:
             st.error(f"Explain failed: {e}")
             explain_ok = False
 
-    st.subheader("Preview")
+    st.subheader("👀 Preview")
     preview_ok = False
     if is_select and is_ro and explain_ok:
         try:
@@ -251,12 +277,12 @@ if "generated_sql" in st.session_state:
         except Exception as e:
             st.error(f"Preview failed: {e}")
 
-    st.subheader("Create Pipeline")
+    st.subheader("🚀 Create Pipeline")
     if not (target_dt_database and target_dt_name):
         st.info("Enter the target Dynamic Table database and table name above.")
     can_create = is_select and is_ro and explain_ok and preview_ok and bool(target_dt_database) and bool(target_dt_name)
 
-    if st.button("Insert into PIPELINE_CONFIG (PENDING)", disabled=not can_create):
+    if st.button("➕ Insert into PIPELINE_CONFIG (PENDING)", disabled=not can_create):
         try:
             insert_pipeline_config(
                 session=session,
@@ -267,5 +293,6 @@ if "generated_sql" in st.session_state:
                 sql_select=sql_text,
             )
             st.success("Inserted. The orchestrator will create the Dynamic Table shortly.")
+            st.balloons()
         except Exception as e:
             st.error(f"Insert failed: {e}")
