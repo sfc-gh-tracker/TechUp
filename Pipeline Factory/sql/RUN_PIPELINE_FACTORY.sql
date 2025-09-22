@@ -31,6 +31,7 @@ def run(session: Session) -> str:
         select
           transformation_sql_snippet,
           target_dt_database,
+          target_dt_schema,
           target_dt_name,
           lag_minutes,
           warehouse
@@ -48,11 +49,15 @@ def run(session: Session) -> str:
     for r in rows:
         snippet = r[''TRANSFORMATION_SQL_SNIPPET'']
         target_dt_database = r[''TARGET_DT_DATABASE'']
+        target_dt_schema = r[''TARGET_DT_SCHEMA'']
         target_dt_name = r[''TARGET_DT_NAME'']
         lag_minutes = int(r[''LAG_MINUTES''])
         warehouse = r[''WAREHOUSE'']
 
-        q_target = quote_identifier(target_dt_name)
+        q_db = quote_identifier(target_dt_database)
+        q_schema = quote_identifier(target_dt_schema)
+        q_table = quote_identifier(target_dt_name)
+        q_target = f"{q_db}.{q_schema}.{q_table}"
         q_wh = quote_identifier(warehouse)
 
         select_sql = build_select_sql(snippet)
@@ -67,7 +72,7 @@ as
         session.sql(dt_sql).collect()
 
         session.sql(
-            f"update PIPELINE_CONFIG set status = ''ACTIVE'' where target_dt_name = {quote_literal(target_dt_name)}"
+            f"update PIPELINE_CONFIG set status = ''ACTIVE'' where target_dt_database = {quote_literal(target_dt_database)} and target_dt_schema = {quote_literal(target_dt_schema)} and target_dt_name = {quote_literal(target_dt_name)}"
         ).collect()
 
         created += 1
