@@ -14,6 +14,10 @@ FEW_SHOTS = [
     "You are a Snowflake SQL assistant. Only output a single SELECT query. Use fully qualified identifiers. Do not include comments or extra text."
 ]
 
+# Pipeline catalog location (fully qualified target for inserts)
+PIPELINE_CATALOG_DB = "TECHUP"
+PIPELINE_CATALOG_SCHEMA = "DEMO"
+
 # Inline utils (replaces external snowflake_utils.py)
 def get_session() -> Session:
     return get_active_session()
@@ -133,26 +137,55 @@ def insert_pipeline_config(
     warehouse: str,
     sql_select: str,
 ):
-    # Insert minimal required fields; status starts as PENDING
-    insert_sql = f"""
-    INSERT INTO PIPELINE_CONFIG (
-        transformation_sql_snippet,
-        target_dt_database,
-        target_dt_schema,
-        target_dt_name,
-        lag_minutes,
-        warehouse,
-        status
-    ) VALUES (
-        $${sql_select}$$,
-        '{target_dt_database}',
-        '{target_dt_schema}',
-        '{target_dt_name}',
-        {lag_minutes},
-        '{warehouse}',
-        'PENDING'
-    )
-    """
+    # Determine if TARGET_DT_SCHEMA column exists in TECHUP.DEMO.PIPELINE_CONFIG
+    has_schema_col = False
+    try:
+        chk_sql = f"select 1 from {PIPELINE_CATALOG_DB}.information_schema.columns where table_schema = '{PIPELINE_CATALOG_SCHEMA}' and table_name = 'PIPELINE_CONFIG' and column_name = 'TARGET_DT_SCHEMA'"
+        has_schema_col = len(session.sql(chk_sql).collect()) > 0
+    except Exception:
+        has_schema_col = False
+
+    table_fqn = f"{PIPELINE_CATALOG_DB}.{PIPELINE_CATALOG_SCHEMA}.PIPELINE_CONFIG"
+
+    if has_schema_col:
+        insert_sql = f"""
+        INSERT INTO {table_fqn} (
+            transformation_sql_snippet,
+            target_dt_database,
+            target_dt_schema,
+            target_dt_name,
+            lag_minutes,
+            warehouse,
+            status
+        ) VALUES (
+            $${sql_select}$$,
+            '{target_dt_database}',
+            '{target_dt_schema}',
+            '{target_dt_name}',
+            {lag_minutes},
+            '{warehouse}',
+            'PENDING'
+        )
+        """
+    else:
+        insert_sql = f"""
+        INSERT INTO {table_fqn} (
+            transformation_sql_snippet,
+            target_dt_database,
+            target_dt_name,
+            lag_minutes,
+            warehouse,
+            status
+        ) VALUES (
+            $${sql_select}$$,
+            '{target_dt_database}',
+            '{target_dt_name}',
+            {lag_minutes},
+            '{warehouse}',
+            'PENDING'
+        )
+        """
+
     session.sql(insert_sql).collect()
 
 st.set_page_config(page_title="Pipeline Factory", page_icon="🧠", layout="wide")
