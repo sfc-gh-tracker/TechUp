@@ -27,7 +27,7 @@ begin
       insert into ACTION_LOG(status, ddl, error) values('SUCCESS', v_sql, null);
       v_count := v_count + 1;
     exception
-      when others then
+      when other then
         insert into ACTION_LOG(status, ddl, error) values('ERROR', v_sql, sqlerrm);
     end;
   end for;

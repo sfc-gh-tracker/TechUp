@@ -32,7 +32,7 @@ begin
       insert into RIGHT_SIZING_LOG(warehouse_name, hour_bucket, recommended_size, recommend_multi_cluster, status, ddl)
       values(v_wh, v_hr, v_size, v_mc, 'SUCCESS', v_sql);
       v_count := v_count + 1;
-    exception when others then
+    exception when other then
       insert into RIGHT_SIZING_LOG(warehouse_name, hour_bucket, recommended_size, recommend_multi_cluster, status, ddl, error)
       values(v_wh, v_hr, v_size, v_mc, 'ERROR', v_sql, sqlerrm);
     end;
