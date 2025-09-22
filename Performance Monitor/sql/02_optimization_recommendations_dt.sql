@@ -27,7 +27,7 @@ select
   case
     when perf.bytes_spilled > 10*1024*1024*1024 then 'High spillage detected'
     when perf.bytes_scanned > 100*1024*1024*1024 then 'High scan volume detected'
-    when perf.avg_queued > 2 then 'High queueing detected'
+    when perf.credits_used > 50 then 'High utilization detected'
     else 'Normal'
   end as issue_category,
   case
@@ -35,7 +35,7 @@ select
       'Recommend defining a cluster key on most selective columns to reduce spillage.'
     when perf.bytes_scanned > 100*1024*1024*1024 and (storage.clustering_key is null or storage.clustering_key = '') then
       'Recommend adding a cluster key to improve pruning on large scans.'
-    when perf.avg_queued > 2 then
+    when perf.credits_used > 50 then
       'Recommend increasing warehouse size or enabling multi-cluster during peak hours.'
     else 'No action needed.'
   end as recommendation_text
