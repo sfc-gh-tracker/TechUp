@@ -28,13 +28,13 @@ begin
     v_wh := rec.warehouse_name; v_hr := rec.hour_bucket; v_size := rec.recommended_size; v_mc := rec.recommend_multi_cluster;
     v_sql := 'alter warehouse ' || v_wh || ' set warehouse_size = ' || v_size || case when v_mc > 0 then ', max_cluster_count = 2' else '' end;
     begin
-      execute immediate v_sql;
+      execute immediate :v_sql;
       insert into RIGHT_SIZING_LOG(warehouse_name, hour_bucket, recommended_size, recommend_multi_cluster, status, ddl)
-      values(v_wh, v_hr, v_size, v_mc, 'SUCCESS', v_sql);
+      values(:v_wh, :v_hr, :v_size, :v_mc, 'SUCCESS', :v_sql);
       v_count := v_count + 1;
     exception when other then
       insert into RIGHT_SIZING_LOG(warehouse_name, hour_bucket, recommended_size, recommend_multi_cluster, status, ddl, error)
-      values(v_wh, v_hr, v_size, v_mc, 'ERROR', v_sql, sqlerrm);
+      values(:v_wh, :v_hr, :v_size, :v_mc, 'ERROR', :v_sql, sqlerrm);
     end;
   end for;
   return 'Applied ' || v_count || ' right-sizing action(s).';

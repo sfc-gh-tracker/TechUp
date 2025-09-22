@@ -23,12 +23,12 @@ begin
   for rec in c do
     v_sql := rec.proposed_ddl;
     begin
-      execute immediate v_sql;
-      insert into ACTION_LOG(status, ddl, error) values('SUCCESS', v_sql, null);
+      execute immediate :v_sql;
+      insert into ACTION_LOG(status, ddl, error) values('SUCCESS', :v_sql, null);
       v_count := v_count + 1;
     exception
       when other then
-        insert into ACTION_LOG(status, ddl, error) values('ERROR', v_sql, sqlerrm);
+        insert into ACTION_LOG(status, ddl, error) values('ERROR', :v_sql, sqlerrm);
     end;
   end for;
   return 'Executed ' || v_count || ' action(s).';
