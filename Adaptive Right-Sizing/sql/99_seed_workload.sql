@@ -24,22 +24,41 @@ where f.ts >= dateadd('hour', -1, current_timestamp());
 -- Procedure to run workload repeatedly with cache disabled
 create or replace procedure RIGHTSIZE_SEED_RUN()
 returns string
-language javascript
+language sql
 execute as owner
 as
 $$
-var cmds = [
-  "alter session set use_cached_result = false",
-  "select count(*) from TECHUP.RIGHTSIZE.FACT f join TECHUP.RIGHTSIZE.DIM d on f.k = d.k where f.ts >= dateadd('hour', -1, current_timestamp())",
-  "select count(*) from TECHUP.RIGHTSIZE.FACT f join TECHUP.RIGHTSIZE.DIM d on f.k = d.k where f.ts >= dateadd('hour', -1, current_timestamp())",
-  "select count(*) from TECHUP.RIGHTSIZE.FACT f join TECHUP.RIGHTSIZE.DIM d on f.k = d.k where f.ts >= dateadd('hour', -1, current_timestamp())",
-  "select sum(v) from TECHUP.RIGHTSIZE.FACT where ts >= dateadd('hour', -1, current_timestamp())",
-  "select d.attr, count(*) from TECHUP.RIGHTSIZE.FACT f join TECHUP.RIGHTSIZE.DIM d on f.k = d.k group by 1 order by 2 desc limit 1000"
-];
-for (var i = 0; i < cmds.length; i++) {
-  snowflake.execute({sqlText: cmds[i]});
-}
-return 'RIGHTSIZE_SEED_RUN completed';
+begin
+  -- Repeat heavy join 3x to amplify load
+  select count(*)
+  from TECHUP.RIGHTSIZE.FACT f
+  join TECHUP.RIGHTSIZE.DIM d on f.k = d.k
+  where f.ts >= dateadd('hour', -1, current_timestamp());
+
+  select count(*)
+  from TECHUP.RIGHTSIZE.FACT f
+  join TECHUP.RIGHTSIZE.DIM d on f.k = d.k
+  where f.ts >= dateadd('hour', -1, current_timestamp());
+
+  select count(*)
+  from TECHUP.RIGHTSIZE.FACT f
+  join TECHUP.RIGHTSIZE.DIM d on f.k = d.k
+  where f.ts >= dateadd('hour', -1, current_timestamp());
+
+  -- Additional aggregations to vary profile
+  select sum(v)
+  from TECHUP.RIGHTSIZE.FACT
+  where ts >= dateadd('hour', -1, current_timestamp());
+
+  select d.attr, count(*)
+  from TECHUP.RIGHTSIZE.FACT f
+  join TECHUP.RIGHTSIZE.DIM d on f.k = d.k
+  group by 1
+  order by 2 desc
+  limit 1000;
+
+  return 'RIGHTSIZE_SEED_RUN completed';
+end;
 $$;
 
 -- Hourly task to execute workload
