@@ -25,10 +25,7 @@ wm as (
     warehouse_name,
     start_time,
     end_time,
-    credits_used,
-    avg_running,
-    avg_queued_load,
-    avg_queued_provisioning
+    credits_used
   from TECHUP.AUDIT.WAREHOUSE_METERING_STG
   where start_time >= dateadd('hour', -24, current_timestamp())
 )
@@ -38,8 +35,6 @@ select
   count(q.query_id) as total_queries,
   sum(q.total_bytes_scanned) as bytes_scanned,
   sum(q.bytes_spilled_to_local_storage + q.bytes_spilled_to_remote_storage) as bytes_spilled,
-  avg(wm.avg_running) as avg_running,
-  avg(wm.avg_queued_load + wm.avg_queued_provisioning) as avg_queued,
   sum(wm.credits_used) as credits_used
 from q
 full outer join wm

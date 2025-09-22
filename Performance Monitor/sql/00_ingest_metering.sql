@@ -9,10 +9,7 @@ select
   end_time,
   credits_used,
   credits_used_compute,
-  credits_used_cloud_services,
-  avg_running,
-  avg_queued_load,
-  avg_queued_provisioning
+  credits_used_cloud_services
 from snowflake.account_usage.warehouse_metering_history
 where start_time >= dateadd(day, -14, current_timestamp());
 
@@ -25,8 +22,7 @@ as
 merge into TECHUP.AUDIT.WAREHOUSE_METERING_STG t
 using (
   select warehouse_id, warehouse_name, start_time, end_time, credits_used,
-         credits_used_compute, credits_used_cloud_services,
-         avg_running, avg_queued_load, avg_queued_provisioning
+         credits_used_compute, credits_used_cloud_services
   from snowflake.account_usage.warehouse_metering_history
   where start_time >= dateadd(day, -2, current_timestamp())
 ) s
@@ -36,18 +32,13 @@ when matched then update set
   end_time = s.end_time,
   credits_used = s.credits_used,
   credits_used_compute = s.credits_used_compute,
-  credits_used_cloud_services = s.credits_used_cloud_services,
-  avg_running = s.avg_running,
-  avg_queued_load = s.avg_queued_load,
-  avg_queued_provisioning = s.avg_queued_provisioning
+  credits_used_cloud_services = s.credits_used_cloud_services
 when not matched then insert (
   warehouse_id, warehouse_name, start_time, end_time, credits_used,
-  credits_used_compute, credits_used_cloud_services,
-  avg_running, avg_queued_load, avg_queued_provisioning
+  credits_used_compute, credits_used_cloud_services
 ) values (
   s.warehouse_id, s.warehouse_name, s.start_time, s.end_time, s.credits_used,
-  s.credits_used_compute, s.credits_used_cloud_services,
-  s.avg_running, s.avg_queued_load, s.avg_queued_provisioning
+  s.credits_used_compute, s.credits_used_cloud_services
 );
 
 alter task TECHUP.AUDIT.INGEST_WAREHOUSE_METERING_TASK resume;
