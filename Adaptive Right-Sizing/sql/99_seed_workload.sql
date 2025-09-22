@@ -31,13 +31,21 @@ $$
 begin
   alter session set use_cached_result = false;
 
-  -- Repeat heavy join 3x to amplify load
-  for i in 1 .. 3 do
-    select count(*)
-    from TECHUP.RIGHTSIZE.FACT f
-    join TECHUP.RIGHTSIZE.DIM d on f.k = d.k
-    where f.ts >= dateadd('hour', -1, current_timestamp());
-  end for;
+  -- Repeat heavy join 3x to amplify load (explicitly to avoid loop parsing issues)
+  select count(*)
+  from TECHUP.RIGHTSIZE.FACT f
+  join TECHUP.RIGHTSIZE.DIM d on f.k = d.k
+  where f.ts >= dateadd('hour', -1, current_timestamp());
+
+  select count(*)
+  from TECHUP.RIGHTSIZE.FACT f
+  join TECHUP.RIGHTSIZE.DIM d on f.k = d.k
+  where f.ts >= dateadd('hour', -1, current_timestamp());
+
+  select count(*)
+  from TECHUP.RIGHTSIZE.FACT f
+  join TECHUP.RIGHTSIZE.DIM d on f.k = d.k
+  where f.ts >= dateadd('hour', -1, current_timestamp());
 
   -- Additional aggregations to vary profile
   select sum(v)
