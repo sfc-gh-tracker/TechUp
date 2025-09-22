@@ -66,7 +66,6 @@ $$;
 create or replace task RIGHTSIZE_SEED_TASK
 warehouse = PIPELINE_WH
 schedule = 'USING CRON 0 * * * * UTC'
-session parameters (USE_CACHED_RESULT = FALSE)
 as call RIGHTSIZE_SEED_RUN();
 
 alter task RIGHTSIZE_SEED_TASK resume;
