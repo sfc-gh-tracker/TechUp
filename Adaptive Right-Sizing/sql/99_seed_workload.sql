@@ -29,7 +29,6 @@ execute as owner
 as
 $$
 begin
-  execute immediate 'alter session set use_cached_result = false';
 
   -- Repeat heavy join 3x to amplify load (explicitly to avoid loop parsing issues)
   select count(*)
@@ -67,6 +66,7 @@ $$;
 create or replace task RIGHTSIZE_SEED_TASK
 warehouse = PIPELINE_WH
 schedule = 'USING CRON 0 * * * * UTC'
+session parameters (USE_CACHED_RESULT = FALSE)
 as call RIGHTSIZE_SEED_RUN();
 
 alter task RIGHTSIZE_SEED_TASK resume;
