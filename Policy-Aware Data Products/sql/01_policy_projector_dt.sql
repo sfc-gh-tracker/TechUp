@@ -9,13 +9,15 @@ with cols as (
     c.table_schema as schema_name,
     c.table_name,
     c.column_name,
-    coalesce(t.tag_value, 'PUBLIC') as sensitivity
-  from information_schema.columns c
-  left join table(information_schema.tag_references_all_columns(object_domain=>'COLUMN')) t
-    on t.object_database = c.table_catalog
-   and t.object_schema = c.table_schema
-   and t.object_name = c.table_name
-   and t.column_name = c.column_name
+    coalesce(tr.tag_value, 'PUBLIC') as sensitivity
+  from TECHUP.information_schema.columns c
+  left join TECHUP.information_schema.tag_references tr
+    on tr.object_database = c.table_catalog
+   and tr.object_schema = c.table_schema
+   and tr.object_name = c.table_name
+   and tr.column_name = c.column_name
+   and upper(tr.tag_name) = 'SENSITIVITY'
+   and upper(tr.domain) = 'COLUMN'
 )
 select
   current_timestamp() as generated_at,
