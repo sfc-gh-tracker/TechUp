@@ -32,7 +32,7 @@ begin
   alter session set use_cached_result = false;
 
   -- Repeat heavy join 3x to amplify load
-  for i in 1..3 do
+  for i in 1 .. 3 do
     select count(*)
     from TECHUP.RIGHTSIZE.FACT f
     join TECHUP.RIGHTSIZE.DIM d on f.k = d.k
