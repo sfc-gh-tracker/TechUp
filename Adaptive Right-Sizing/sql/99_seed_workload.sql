@@ -29,7 +29,7 @@ execute as owner
 as
 $$
 begin
-  alter session set use_cached_result = false;
+  execute immediate 'alter session set use_cached_result = false';
 
   -- Repeat heavy join 3x to amplify load (explicitly to avoid loop parsing issues)
   select count(*)
