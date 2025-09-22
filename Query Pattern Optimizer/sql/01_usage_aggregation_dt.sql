@@ -15,7 +15,7 @@ select
   regexp_substr(query_text, 'from[[:space:]]+([A-Za-z0-9_\.\"`]+)', 1, 1, 'ie', 1) as from_obj,
   regexp_substr(query_text, 'join[[:space:]]+([A-Za-z0-9_\.\"`]+)', 1, 1, 'ie', 1) as join_obj,
   regexp_substr(query_text, 'where[[:space:]]+.*', 1, 1, 'i') as where_clause
-from snowflake.account_usage.query_history
+from TECHUP.QPO_AUDIT.QUERY_HISTORY_STG
 where start_time >= dateadd('hour', -24, current_timestamp())
   and query_text ilike '%select%';
 
