@@ -103,3 +103,14 @@ The application integrates with your existing `PIPELINE_CONFIG` table structure:
 - Verify Cortex AI is enabled and accessible
 - Check that the `snowflake-arctic` model is available
 - Ensure your schema metadata is being fetched correctly
+
+## Google Slides
+
+Generate a one-slide deck and write link to `slides_link.txt`:
+
+1. Place `credentials.json` at repo root (Google OAuth for Slides/Drive)
+2. Install dependencies:
+   - `pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib`
+3. Run from repo root:
+   - `python3 slides_generator_gdrive.py`
+4. Link saved to `Pipeline Factory/slides_link.txt`
