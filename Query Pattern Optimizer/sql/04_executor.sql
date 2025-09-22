@@ -25,7 +25,7 @@ begin
       execute immediate v_sql;
       insert into QPO_ACTION_LOG(object_name, status, ddl) values(v_obj,'SUCCESS',v_sql);
       v_count := v_count + 1;
-    exception when others then
+    exception when other then
       insert into QPO_ACTION_LOG(object_name, status, ddl, error) values(v_obj,'ERROR',v_sql,sqlerrm);
     end;
   end for;
